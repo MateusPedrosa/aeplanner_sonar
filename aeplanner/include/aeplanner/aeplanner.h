@@ -62,6 +62,7 @@ private:
   // Publishers
   ros::Publisher rrt_marker_pub_;
   ros::Publisher gain_pub_;
+  ros::Publisher bbx_marker_pub_;
 
   // TF
   tf::TransformListener tf_listener_;

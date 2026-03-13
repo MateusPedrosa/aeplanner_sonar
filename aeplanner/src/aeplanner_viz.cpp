@@ -85,4 +85,57 @@ namespace aeplanner {
     return marker;
   }
 
+  visualization_msgs::Marker createBoundingBoxMarker(const std::vector<double>& min, const std::vector<double>& max, int id, std::string frame_id) {
+    visualization_msgs::Marker marker;
+    marker.header.stamp = ros::Time::now();
+    marker.header.seq = id;
+    marker.header.frame_id = frame_id;
+    marker.id = id;
+    marker.ns = "bounding_box";
+    marker.type = visualization_msgs::Marker::LINE_LIST;
+    marker.action = visualization_msgs::Marker::ADD;
+    marker.scale.x = 0.2; // Line width
+    
+    marker.color.r = 1.0;
+    marker.color.g = 0.5;
+    marker.color.b = 0.0;
+    marker.color.a = 0.8;
+    marker.lifetime = ros::Duration(10.0);
+    marker.frame_locked = false;
+
+    // Define the 8 corners of the bounding box
+    geometry_msgs::Point p[8];
+    // Bottom face (z = min)
+    p[0].x = min[0]; p[0].y = min[1]; p[0].z = min[2];
+    p[1].x = max[0]; p[1].y = min[1]; p[1].z = min[2];
+    p[2].x = max[0]; p[2].y = max[1]; p[2].z = min[2];
+    p[3].x = min[0]; p[3].y = max[1]; p[3].z = min[2];
+    // Top face (z = max)
+    p[4].x = min[0]; p[4].y = min[1]; p[4].z = max[2];
+    p[5].x = max[0]; p[5].y = min[1]; p[5].z = max[2];
+    p[6].x = max[0]; p[6].y = max[1]; p[6].z = max[2];
+    p[7].x = min[0]; p[7].y = max[1]; p[7].z = max[2];
+
+    // Add edges (12 edges total, each is 2 points)
+    // Bottom rectangle
+    marker.points.push_back(p[0]); marker.points.push_back(p[1]);
+    marker.points.push_back(p[1]); marker.points.push_back(p[2]);
+    marker.points.push_back(p[2]); marker.points.push_back(p[3]);
+    marker.points.push_back(p[3]); marker.points.push_back(p[0]);
+
+    // Top rectangle
+    marker.points.push_back(p[4]); marker.points.push_back(p[5]);
+    marker.points.push_back(p[5]); marker.points.push_back(p[6]);
+    marker.points.push_back(p[6]); marker.points.push_back(p[7]);
+    marker.points.push_back(p[7]); marker.points.push_back(p[4]);
+
+    // Pillars (connecting top and bottom)
+    marker.points.push_back(p[0]); marker.points.push_back(p[4]);
+    marker.points.push_back(p[1]); marker.points.push_back(p[5]);
+    marker.points.push_back(p[2]); marker.points.push_back(p[6]);
+    marker.points.push_back(p[3]); marker.points.push_back(p[7]);
+
+    return marker;
+  }
+
 }

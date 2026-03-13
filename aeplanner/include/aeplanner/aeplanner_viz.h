@@ -16,5 +16,6 @@ namespace aeplanner {
 
   visualization_msgs::Marker createNodeMarker(RRTNode * node, int id, std::string frame_id);
   visualization_msgs::Marker createEdgeMarker(RRTNode * node, int id, std::string frame_id, double lambda);
+  visualization_msgs::Marker createBoundingBoxMarker(const std::vector<double>& min, const std::vector<double>& max, int id, std::string frame_id);
 }
 #endif

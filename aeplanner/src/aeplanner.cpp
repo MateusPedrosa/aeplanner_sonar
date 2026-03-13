@@ -10,6 +10,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   , agent_pose_sub_(nh_.subscribe("agent_pose", 1, &AEPlanner::agentPoseCallback, this))
   , rrt_marker_pub_(nh_.advertise<visualization_msgs::MarkerArray>("rrtree", 1000))
   , gain_pub_(nh_.advertise<pigain::Node>("gain_node", 1000))
+  , bbx_marker_pub_(nh_.advertise<visualization_msgs::Marker>("bbx", 1000, true)) // Latched
   , gp_query_client_(nh_.serviceClient<pigain::Query>("gp_query_server"))
   , reevaluate_server_(nh_.advertiseService("reevaluate", &AEPlanner::reevaluate, this))
   , best_node_client_(nh_.serviceClient<pigain::BestNode>("best_node_server"))
@@ -58,6 +59,10 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
   ROS_DEBUG("createRRTMarker");
   rrt_marker_pub_.publish(createRRTMarkerArray(root, params_.lambda));
+  
+  // Publish bounding box
+  bbx_marker_pub_.publish(createBoundingBoxMarker(params_.boundary_min, params_.boundary_max, 0, params_.world_frame));
+
   ROS_DEBUG("publishRecursive");
   publishEvaluatedNodesRecursive(root);
 
