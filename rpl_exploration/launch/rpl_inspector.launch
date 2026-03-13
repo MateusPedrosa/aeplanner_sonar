@@ -13,7 +13,7 @@
       <param name="resolution" type="double" value="$(arg resolution)" />
       <param name="visualize_max_z" type="double" value="$(arg visualize_max_z)" />
       <param name="sensor_max_range" type="double" value="$(arg sensor_max_range)" />
-      <remap from="pose" to="/mavros/local_position/pose"/>
+      <remap from="pose" to="/oceansim/robot/pose"/>
       <remap from="aeplanner" to="/$(arg mav_name)/aeplanner"/>
       <remap from="octomap" to="/octomap_full"/>
       <rosparam command="load" file="$(arg param_file)" />

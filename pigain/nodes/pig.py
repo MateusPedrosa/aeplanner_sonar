@@ -96,7 +96,7 @@ class PIGain:
                 reevaluate_list.append(item)
         try:
             res = self.reevaluate_client(reevaluate_position_list)
-        except rospy.ServiceException, e:
+        except rospy.ServiceException as e:
             rospy.logerr("Calling reevaluate service failed")
             return
 

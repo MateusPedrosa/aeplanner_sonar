@@ -59,8 +59,7 @@ int main(int argc, char** argv)
 
   // Get current pose
   geometry_msgs::PoseStamped::ConstPtr init_pose =
-      ros::topic::waitForMessage<geometry_msgs::PoseStamped>("/mavros/"
-                                                             "local_position/pose");
+      ros::topic::waitForMessage<geometry_msgs::PoseStamped>("/oceansim/robot/pose"); // "/mavros/local_position/pose"
   double init_yaw = tf2::getYaw(init_pose->pose.orientation);
   // Up 2 meters and then forward one meter
   double initial_positions[8][4] = {
@@ -89,7 +88,12 @@ int main(int argc, char** argv)
     ROS_INFO_STREAM("Sending initial goal...");
     ac.sendGoal(goal);
 
-    ac.waitForResult(ros::Duration(0));
+    // ac.waitForResult(ros::Duration(0));
+
+    last_pose.header.stamp = ros::Time::now();
+    last_pose.header.frame_id = "map";
+    pub.publish(last_pose);
+    ros::Duration(2.0).sleep(); // Wait 2 seconds before sending the next one
   }
 
   // Start planning: The planner is called and the computed path sent to the
@@ -110,6 +114,8 @@ int main(int argc, char** argv)
 
     while (!aep_ac.waitForResult(ros::Duration(0.05)))
     {
+      last_pose.header.stamp = ros::Time::now();
+      last_pose.header.frame_id = "map";
       pub.publish(last_pose);
     }
 
@@ -129,7 +135,7 @@ int main(int argc, char** argv)
       goal.pose = goal_pose;
       ac.sendGoal(goal);
 
-      ac.waitForResult(ros::Duration(0));
+      // ac.waitForResult(ros::Duration(0));
 
       fly_time = ros::Time::now() - s;
     }
@@ -153,6 +159,8 @@ int main(int argc, char** argv)
       rrt_ac.sendGoal(rrt_goal);
       while (!rrt_ac.waitForResult(ros::Duration(0.05)))
       {
+        last_pose.header.stamp = ros::Time::now();
+        last_pose.header.frame_id = "map";
         pub.publish(last_pose);
       }
       nav_msgs::Path path = rrt_ac.getResult()->path;
@@ -170,7 +178,7 @@ int main(int argc, char** argv)
         goal.pose.pose = goal_pose;
         ac.sendGoal(goal);
 
-        ac.waitForResult(ros::Duration(0));
+        // ac.waitForResult(ros::Duration(0));
       }
       actions_taken = -1;
       fly_time = ros::Time::now() - s;

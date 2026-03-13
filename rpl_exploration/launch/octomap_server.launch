@@ -8,8 +8,8 @@
 		<param name="frame_id" type="string" value="map" />
 		
 		<!-- maximum range to integrate (speedup!) -->
-		<param name="sensor_model/max_range" value="5" />
+		<param name="sensor_model/max_range" value="40" />
 
-    <remap from="cloud_in" to="/camera/depth/points2" />
+    <remap from="cloud_in" to="/sonar_point_cloud" />
 	</node>
 </launch>
