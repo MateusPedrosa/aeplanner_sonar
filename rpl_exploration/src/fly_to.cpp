@@ -10,11 +10,13 @@ namespace rpl_exploration {
     private:
       ros::NodeHandle nh_;
       ros::Publisher pub_;
+      ros::Publisher nbv_pub_;
       actionlib::SimpleActionServer<rpl_exploration::FlyToAction> as_;
 
       tf::TransformListener listener;
     public:
       FlyTo() : pub_(nh_.advertise<geometry_msgs::PoseStamped>("fly_to_cmd", 1000)),
+                nbv_pub_(nh_.advertise<geometry_msgs::PoseStamped>("/aeplanner/nbv_setpoint", 1000)),
                 as_(nh_, "fly_to", boost::bind(&FlyTo::execute, this, _1, &as_), false)
       {
         ROS_INFO("Starting fly to server");
@@ -46,11 +48,20 @@ namespace rpl_exploration {
         double roll, pitch, goal_yaw;
         m.getRPY(roll, pitch, goal_yaw);
 
+        // Publish the goal exact once to the nbv_setpoint topic
+        geometry_msgs::PoseStamped nbv_pose = goal->pose;
+        nbv_pose.header.stamp = ros::Time::now();
+        nbv_pose.header.frame_id = "map";
+        nbv_pub_.publish(nbv_pose);
+
         // Check if target is reached...
         do
         {
           ROS_INFO_STREAM("Publishing goal to (" << p.x << ", " << p.y << ", " << p.z << ") ");
-          pub_.publish(goal->pose);
+          geometry_msgs::PoseStamped goal_pose = goal->pose;
+          goal_pose.header.stamp = ros::Time::now();
+          goal_pose.header.frame_id = "map";
+          pub_.publish(goal_pose);
 
           listener.waitForTransform("/map", "/base_link", ros::Time(0), ros::Duration(10.0) );
           listener.lookupTransform("/map", "/base_link", ros::Time(0), transform);
