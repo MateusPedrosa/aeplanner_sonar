@@ -31,6 +31,7 @@ namespace aeplanner
 
     std::string robot_frame;
     std::string world_frame;
+    std::string sensor_frame;
 
     bool visualize_tree;
     bool visualize_rays;

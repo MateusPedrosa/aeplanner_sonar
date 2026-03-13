@@ -63,6 +63,9 @@ private:
   ros::Publisher rrt_marker_pub_;
   ros::Publisher gain_pub_;
 
+  // TF
+  tf::TransformListener tf_listener_;
+
   // Services
   ros::ServiceClient best_node_client_;
   ros::ServiceClient gp_query_client_;

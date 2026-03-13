@@ -370,8 +370,34 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 
   std::map<int, double> gain_per_yaw;
 
-  Eigen::Vector3d origin(state[0], state[1], state[2]);
-  Eigen::Vector3d vec, dir;
+  // Proposed state of the robot (base_link) in the world frame:
+  tf::Vector3 base_origin(state[0], state[1], state[2]);
+  tf::Quaternion base_quat;
+  base_quat.setEuler(0.0, 0.0, state[3]); // Roll=0, Pitch=0, Yaw=state[3]
+  tf::Pose base_pose_in_world(base_quat, base_origin);
+
+  // Transform from base_link to sensor_frame
+  tf::StampedTransform base_to_sensor;
+  try
+  {
+    // Static transform between the robot frame and the sensor frame
+    tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame, ros::Time(0), base_to_sensor);
+  }
+  catch (tf::TransformException &ex)
+  {
+    ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
+    base_to_sensor.setIdentity();
+  }
+
+  // Sensor's pose in the world frame
+  tf::Pose sensor_pose_in_world = base_pose_in_world * base_to_sensor;
+  
+  Eigen::Vector3d sensor_origin(sensor_pose_in_world.getOrigin().x(),
+                                sensor_pose_in_world.getOrigin().y(),
+                                sensor_pose_in_world.getOrigin().z());
+
+  // 3x3 rotation matrix for the sensor to transform the rays
+  tf::Matrix3x3 sensor_rot = sensor_pose_in_world.getBasis();
 
   int id = 0;
   for (theta = -180; theta < 180; theta += dtheta)
@@ -384,10 +410,26 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
       double g = 0;
       for (r = params_.r_min; r < params_.r_max; r += dr)
       {
-        vec[0] = state[0] + r * cos(theta_rad) * sin(phi_rad);
-        vec[1] = state[1] + r * sin(theta_rad) * sin(phi_rad);
-        vec[2] = state[2] + r * cos(phi_rad);
-        dir = vec - origin;
+        // Calculate the ray vector in the sensor's local frame
+        // Standard spherical to cartesian where X is forward:
+        // x = r * sin(phi) * cos(theta)
+        // y = r * sin(phi) * sin(theta)
+        // z = r * cos(phi)
+        tf::Vector3 ray_local(
+            r * sin(phi_rad) * cos(theta_rad),
+            r * sin(phi_rad) * sin(theta_rad),
+            r * cos(phi_rad)
+        );
+
+        // Rotate the ray to the world frame using the sensor's rotation
+        tf::Vector3 ray_world = sensor_rot * ray_local;
+
+        // The point to query in the world is the sensor's origin + the rotated ray
+        Eigen::Vector3d vec(
+            sensor_origin.x() + ray_world.x(),
+            sensor_origin.y() + ray_world.y(),
+            sensor_origin.z() + ray_world.z()
+        );
 
         octomap::point3d query(vec[0], vec[1], vec[2]);
         octomap::OcTreeNode* result = ot->search(query);

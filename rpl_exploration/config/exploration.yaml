@@ -22,8 +22,8 @@ rrt/min_nodes: 100
 
 # bounding box: necessary to limit the simulation 
 # scenario (smaller than actual gazebo scenario)
-boundary/min: [-5.0, -5.0, -5.0]
-boundary/max: [ 5.0,  5.0, 5.0]
+boundary/min: [-50.0, -50.0, -10.0]
+boundary/max: [ 150.0,  50.0, 10.0]
 
 visualize_rays: false
 visualize_tree: true
@@ -31,4 +31,5 @@ visualize_exploration_area: true
 
 robot_frame: "base_link"
 world_frame: "map"
+sensor_frame: "sonar_link"
 

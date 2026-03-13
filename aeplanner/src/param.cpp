@@ -91,6 +91,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/robot_frame", params.robot_frame)) {
       ROS_WARN_STREAM("No /robot_frame specified. Default: " << params.robot_frame);
     }
+    params.sensor_frame = "sonar_link";
+    if (!ros::param::get(ns + "/sensor_frame", params.sensor_frame)) {
+      ROS_WARN_STREAM("No /sensor_frame specified. Default: " << params.sensor_frame);
+    }
     params.visualize_tree = false;
     if (!ros::param::get(ns + "/visualize_tree", params.visualize_tree)) {
       ROS_WARN_STREAM("No /visualize_tree specified. Default: " << params.visualize_tree);
