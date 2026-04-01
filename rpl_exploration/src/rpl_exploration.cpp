@@ -88,7 +88,7 @@ int main(int argc, char** argv)
     ROS_INFO_STREAM("Sending initial goal...");
     ac.sendGoal(goal);
 
-    // ac.waitForResult(ros::Duration(0));
+    ac.waitForResult(ros::Duration(0));
 
     last_pose.header.stamp = ros::Time::now();
     last_pose.header.frame_id = "map";
@@ -135,7 +135,7 @@ int main(int argc, char** argv)
       goal.pose = goal_pose;
       ac.sendGoal(goal);
 
-      // ac.waitForResult(ros::Duration(0));
+      ac.waitForResult(ros::Duration(0));
 
       fly_time = ros::Time::now() - s;
     }
@@ -178,7 +178,7 @@ int main(int argc, char** argv)
         goal.pose.pose = goal_pose;
         ac.sendGoal(goal);
 
-        // ac.waitForResult(ros::Duration(0));
+        ac.waitForResult(ros::Duration(0));
       }
       actions_taken = -1;
       fly_time = ros::Time::now() - s;

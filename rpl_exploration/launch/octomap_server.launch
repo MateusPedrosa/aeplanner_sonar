@@ -10,6 +10,9 @@
 		<!-- maximum range to integrate (speedup!) -->
 		<param name="sensor_model/max_range" value="40" />
 
+		<!-- <param name="sensor_model/hit" value="0.6" />
+        <param name="sensor_model/miss" value="0.2" /> -->
+
     <remap from="cloud_in" to="/sonar_point_cloud" />
 	</node>
 </launch>

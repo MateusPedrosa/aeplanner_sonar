@@ -227,7 +227,7 @@ Eigen::Vector4d AEPlanner::sampleNewPoint()
 {
   // Samples one point uniformly over a sphere with a radius of
   // param_.max_sampling_radius
-  Eigen::Vector4d point;
+  Eigen::Vector4d point = Eigen::Vector4d::Zero();
   do
   {
     for (int i = 0; i < 3; i++)
@@ -362,134 +362,126 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 {
   std::shared_ptr<octomap::OcTree> ot = ot_;
-  double gain = 0.0;
 
   // This function computes the gain
-  double fov_y = params_.hfov, fov_p = params_.vfov;
+  double hfov = params_.hfov, vfov = params_.vfov;
 
   double dr = params_.dr, dphi = params_.dphi, dtheta = params_.dtheta;
   double dphi_rad = M_PI * dphi / 180.0f, dtheta_rad = M_PI * dtheta / 180.0f;
   double r;
-  int phi, theta;
-  double phi_rad, theta_rad;
+  int body_yaw, phi, theta;
+  double body_yaw_rad, theta_rad, phi_rad;
 
   std::map<int, double> gain_per_yaw;
 
   // Proposed state of the robot (base_link) in the world frame:
-  tf::Vector3 base_origin(state[0], state[1], state[2]);
-  tf::Quaternion base_quat;
-  base_quat.setEuler(0.0, 0.0, state[3]); // Roll=0, Pitch=0, Yaw=state[3]
-  tf::Pose base_pose_in_world(base_quat, base_origin);
+    tf::Vector3 base_origin(state[0], state[1], state[2]);
 
-  // Transform from base_link to sensor_frame
-  tf::StampedTransform base_to_sensor;
-  try
+  for (body_yaw = -180; body_yaw < 180; body_yaw += dtheta)
   {
-    // Static transform between the robot frame and the sensor frame
-    tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame, ros::Time(0), base_to_sensor);
-  }
-  catch (tf::TransformException &ex)
-  {
-    ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
-    base_to_sensor.setIdentity();
-  }
+    body_yaw_rad = body_yaw * M_PI/ 180.0f;
 
-  // Sensor's pose in the world frame
-  tf::Pose sensor_pose_in_world = base_pose_in_world * base_to_sensor;
-  
-  Eigen::Vector3d sensor_origin(sensor_pose_in_world.getOrigin().x(),
-                                sensor_pose_in_world.getOrigin().y(),
-                                sensor_pose_in_world.getOrigin().z());
+    tf::Quaternion base_quat;
+    base_quat.setEuler(0.0, 0.0, body_yaw_rad); // (Roll, Pitch, Yaw)
+    tf::Pose base_pose_in_world(base_quat, base_origin);
 
-  // 3x3 rotation matrix for the sensor to transform the rays
-  tf::Matrix3x3 sensor_rot = sensor_pose_in_world.getBasis();
-
-  int id = 0;
-  for (theta = -180; theta < 180; theta += dtheta)
-  {
-    theta_rad = M_PI * theta / 180.0f;
-    for (phi = 90 - fov_p / 2; phi < 90 + fov_p / 2; phi += dphi)
+    // Transform from base_link to sensor_frame
+    tf::StampedTransform base_to_sensor;
+    try
     {
-      phi_rad = M_PI * phi / 180.0f;
+      // Static transform between the robot frame and the sensor frame
+      tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame, ros::Time(0), base_to_sensor);
+    }
+    catch (tf::TransformException &ex)
+    {
+      ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
+      base_to_sensor.setIdentity();
+    }
 
-      double g = 0;
-      for (r = params_.r_min; r < params_.r_max; r += dr)
+    // Sensor's pose in the world frame
+    tf::Pose sensor_pose_in_world = base_pose_in_world * base_to_sensor;
+    
+    Eigen::Vector3d sensor_origin(sensor_pose_in_world.getOrigin().x(),
+                                  sensor_pose_in_world.getOrigin().y(),
+                                  sensor_pose_in_world.getOrigin().z());
+
+    // 3x3 rotation matrix for the sensor to transform the rays
+    tf::Matrix3x3 sensor_rot = sensor_pose_in_world.getBasis();
+
+    double g = 0;
+    for (theta = -hfov/2; theta < hfov/2; theta += dtheta)
+    {
+      theta_rad = theta * M_PI / 180.0f;
+      for (phi = 90 - vfov / 2; phi < 90 + vfov / 2; phi += dphi)
       {
-        // Calculate the ray vector in the sensor's local frame
-        // Standard spherical to cartesian where X is forward:
-        // x = r * sin(phi) * cos(theta)
-        // y = r * sin(phi) * sin(theta)
-        // z = r * cos(phi)
-        tf::Vector3 ray_local(
-            r * sin(phi_rad) * cos(theta_rad),
-            r * sin(phi_rad) * sin(theta_rad),
-            r * cos(phi_rad)
-        );
+        phi_rad = phi * M_PI / 180.0f;
 
-        // Rotate the ray to the world frame using the sensor's rotation
-        tf::Vector3 ray_world = sensor_rot * ray_local;
-
-        // The point to query in the world is the sensor's origin + the rotated ray
-        Eigen::Vector3d vec(
-            sensor_origin.x() + ray_world.x(),
-            sensor_origin.y() + ray_world.y(),
-            sensor_origin.z() + ray_world.z()
-        );
-
-        octomap::point3d query(vec[0], vec[1], vec[2]);
-        octomap::OcTreeNode* result = ot->search(query);
-
-        Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
-        if (!isInsideBoundaries(v))
-          break;
-        if (result)
+        for (r = params_.r_min; r < params_.r_max; r += dr)
         {
-          // Break if occupied so we don't count any information gain behind a wall.
-          if (result->getLogOdds() > 0)
+          // Calculate the ray vector in the sensor's local frame
+          // Standard spherical to cartesian where X is forward
+          tf::Vector3 ray_local(
+              r * sin(phi_rad) * cos(theta_rad),
+              r * sin(phi_rad) * sin(theta_rad),
+              r * cos(phi_rad)
+          );
+
+          // Rotate the ray to the world frame using the sensor's rotation
+          tf::Vector3 ray_world = sensor_rot * ray_local;
+
+          // The point to query in the world is the sensor's origin + the rotated ray
+          Eigen::Vector3d vec(
+              sensor_origin.x() + ray_world.x(),
+              sensor_origin.y() + ray_world.y(),
+              sensor_origin.z() + ray_world.z()
+          );
+
+          octomap::point3d query(vec[0], vec[1], vec[2]);
+          octomap::OcTreeNode* result = ot->search(query);
+
+          Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
+          if (!isInsideBoundaries(v))
             break;
+          if (result)
+          {
+            // Break if occupied so we don't count any information gain behind a wall.
+            if (result->getLogOdds() > 0)
+              break;
+          }
+          else
+            g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) *
+                sin(dphi_rad / 2);
         }
-        else
-          g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) *
-               sin(dphi_rad / 2);
       }
-
-      gain += g;
-      gain_per_yaw[theta] += g;
     }
+    gain_per_yaw[body_yaw] = g;
   }
 
-  int best_yaw = 0;
-  double best_yaw_score = 0;
-  for (int yaw = -180; yaw < 180; yaw++)
-  {
-    double yaw_score = 0;
-    for (int fov = -fov_y / 2; fov < fov_y / 2; fov++)
-    {
-      int theta = yaw + fov;
-      if (theta < -180)
-        theta += 360;
-      if (theta > 180)
-        theta -= 360;
-      yaw_score += gain_per_yaw[theta];
-    }
+  // Debug: log all sampled body yaws and their scores
+  ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2] << "):");
+  for (const auto& kv : gain_per_yaw)
+      ROS_DEBUG_STREAM("  yaw " << std::setw(5) << kv.first << " deg  score: " << kv.second);
 
-    if (best_yaw_score < yaw_score)
-    {
-      best_yaw_score = yaw_score;
-      best_yaw = yaw;
-    }
-  }
+  auto best_it = std::max_element(gain_per_yaw.begin(), gain_per_yaw.end(),
+    [](const std::pair<int,double>& a, const std::pair<int,double>& b) {
+        return a.second < b.second;
+    });
 
-  double r_max = params_.r_max;
-  double h_max = params_.hfov / M_PI * 180;
-  double v_max = params_.vfov / M_PI * 180;
+  int best_yaw_deg = best_it->first;
+  double best_yaw_score = best_it->second;
 
-  gain = best_yaw_score;  // / ((r_max*r_max*r_max/3) * h_max * (1-cos(v_max))) ;
+  ROS_DEBUG_STREAM("  --> best_yaw: " << best_yaw_deg << " deg  score: " << best_yaw_score);
 
-  double yaw = M_PI * best_yaw / 180.f;
+  // double r_max = params_.r_max;
+  // double h_max = params_.hfov / M_PI * 180;
+  // double v_max = params_.vfov / M_PI * 180;
+
+  // gain = best_yaw_score / ((r_max*r_max*r_max/3) * h_max * (1-cos(v_max))) ;
+
+  double yaw = best_yaw_deg * M_PI / 180.f;
 
   state[3] = yaw;
-  return std::make_pair(gain, yaw);
+  return std::make_pair(best_yaw_score, yaw);
 }
 
 geometry_msgs::PoseArray AEPlanner::getFrontiers()
@@ -497,9 +489,11 @@ geometry_msgs::PoseArray AEPlanner::getFrontiers()
   geometry_msgs::PoseArray frontiers;
 
   pigain::BestNode srv;
-  srv.request.threshold = 16; // FIXME parameterize
+  srv.request.threshold = 50; // FIXME parameterize
+  ROS_INFO_STREAM("Asking pigain for frontiers with threshold: " << srv.request.threshold);
   if (best_node_client_.call(srv))
   {
+    ROS_INFO_STREAM("pigain returned " << srv.response.best_node.size() << " frontiers. Best gain was " << srv.response.gain);
     for (int i = 0; i < srv.response.best_node.size(); ++i)
     {
       geometry_msgs::Pose frontier;
