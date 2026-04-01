@@ -6,7 +6,7 @@ namespace aeplanner
 AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   : nh_(nh)
   , as_(nh_, "make_plan", boost::bind(&AEPlanner::execute, this, _1), false)
-  , octomap_sub_(nh_.subscribe("octomap", 1, &AEPlanner::octomapCallback, this))
+  , point_sub_(nh_.subscribe("pointcloud", 1, &AEPlanner::cloudCallback, this))
   , agent_pose_sub_(nh_.subscribe("agent_pose", 1, &AEPlanner::agentPoseCallback, this))
   , rrt_marker_pub_(nh_.advertise<visualization_msgs::MarkerArray>("rrtree", 1000))
   , gain_pub_(nh_.advertise<pigain::Node>("gain_node", 1000))
@@ -21,6 +21,40 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
 {
   params_ = readParams();
   as_.start();
+
+  double resolution = 0.2;
+  int block_depth = 5;
+  double sf2 = 0.1;
+  double ell = 0.6;
+  double free_thresh = 0.3;
+  double occupied_thresh = 0.7;
+  float var_thresh = 100.0f;
+  float prior_A = 0.001f;
+  float prior_B = 0.001f;
+  float theta_bw = 0.6f * 3.1415926f / 180.0f;
+  float phi_bw = 20.0f * 3.1415926f / 180.0f;
+
+  ros::NodeHandle nh_priv("~");
+  nh_priv.param<double>("resolution", resolution, resolution);
+  nh_priv.param<int>("block_depth", block_depth, block_depth);
+  nh_priv.param<double>("sf2", sf2, sf2);
+  nh_priv.param<double>("ell", ell, ell);
+  nh_priv.param<double>("free_thresh", free_thresh, free_thresh);
+  nh_priv.param<double>("occupied_thresh", occupied_thresh, occupied_thresh);
+  nh_priv.param<float>("var_thresh", var_thresh, var_thresh);
+  nh_priv.param<float>("prior_A", prior_A, prior_A);
+  nh_priv.param<float>("prior_B", prior_B, prior_B);
+  nh_priv.param<float>("theta_bw", theta_bw, theta_bw);
+  nh_priv.param<float>("phi_bw", phi_bw, phi_bw);
+
+  ot_ = std::make_shared<la3dm::BGKLOctoMap>(resolution, block_depth, sf2, ell, free_thresh, occupied_thresh, var_thresh, prior_A, prior_B, theta_bw, phi_bw);
+
+  m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/occupied_cells_vis_array", resolution);
+  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", resolution);
+  m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", resolution);
+  m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/uncertain_cells_vis_array", resolution);
+  m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", resolution);
+  m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/variance_vis_array", resolution);
 
   // Initialize kd-tree
   kd_tree_ = kd_create(3);
@@ -143,7 +177,7 @@ void AEPlanner::reevaluatePotentialInformationGainRecursive(RRTNode* node)
 
 void AEPlanner::expandRRT()
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
+  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
 
   // Expand an RRT tree and calculate information gain in every node
   ROS_DEBUG_STREAM("Entering expanding RRT");
@@ -156,7 +190,7 @@ void AEPlanner::expandRRT()
     ROS_DEBUG_STREAM("In expand RRT iteration: " << n);
     RRTNode* new_node = new RRTNode();
     RRTNode* nearest;
-    octomap::OcTreeNode* ot_result;
+    la3dm::OcTreeNode ot_result;
 
     // Sample new point around agent and check that
     // (1) it is within the boundaries
@@ -178,9 +212,8 @@ void AEPlanner::expandRRT()
                                        << new_node->state_[2] << ")");
       ROS_DEBUG_STREAM("    nearest (" << nearest->state_[0] << ", " << nearest->state_[1]
                                        << ", " << nearest->state_[2] << ")");
-      ot_result = ot->search(octomap::point3d(new_node->state_[0], new_node->state_[1],
-                                              new_node->state_[2]));
-      if (ot_result == NULL)
+      ot_result = ot->search(new_node->state_[0], new_node->state_[1], new_node->state_[2]);
+      if (ot_result.get_state() == la3dm::State::UNKNOWN)
         continue;
       ROS_DEBUG_STREAM("ot check done!");
 
@@ -188,7 +221,7 @@ void AEPlanner::expandRRT()
       ROS_DEBUG_STREAM("In known space?     " << ot_result);
       ROS_DEBUG_STREAM("Collision?          " << collisionLine(
                            nearest->state_, new_node->state_, params_.bounding_radius));
-    } while (!isInsideBoundaries(new_node->state_) or !ot_result or
+    } while (!isInsideBoundaries(new_node->state_) or ot_result.get_state() == la3dm::State::UNKNOWN or
              collisionLine(nearest->state_, new_node->state_, params_.bounding_radius));
 
     ROS_DEBUG_STREAM("New node (" << new_node->state_[0] << ", " << new_node->state_[1]
@@ -241,7 +274,7 @@ Eigen::Vector4d AEPlanner::sampleNewPoint()
 
 RRTNode* AEPlanner::chooseParent(RRTNode* node, double l)
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
+  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
   Eigen::Vector4d current_state = current_state_;
 
   // Find nearest neighbour
@@ -280,7 +313,7 @@ RRTNode* AEPlanner::chooseParent(RRTNode* node, double l)
 void AEPlanner::rewire(kdtree* kd_tree, RRTNode* new_node, double l, double r,
                        double r_os)
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
+  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
   Eigen::Vector4d current_state = current_state_;
 
   RRTNode* node_nn;
@@ -361,7 +394,7 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
 
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
+  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
 
   // This function computes the gain
   double hfov = params_.hfov, vfov = params_.vfov;
@@ -436,16 +469,15 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
               sensor_origin.z() + ray_world.z()
           );
 
-          octomap::point3d query(vec[0], vec[1], vec[2]);
-          octomap::OcTreeNode* result = ot->search(query);
+          la3dm::OcTreeNode result = ot->search(vec[0], vec[1], vec[2]);
 
           Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
           if (!isInsideBoundaries(v))
             break;
-          if (result)
+          if (result.get_state() != la3dm::State::UNKNOWN)
           {
             // Break if occupied so we don't count any information gain behind a wall.
-            if (result->getLogOdds() > 0)
+            if (result.get_state() == la3dm::State::OCCUPIED)
               break;
           }
           else
@@ -517,28 +549,31 @@ bool AEPlanner::isInsideBoundaries(Eigen::Vector4d point)
 
 bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
+  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
   ROS_DEBUG_STREAM("In collision");
   octomap::point3d start(p1[0], p1[1], p1[2]);
   octomap::point3d end(p2[0], p2[1], p2[2]);
-  octomap::point3d min(std::min(p1[0], p2[0]) - r, std::min(p1[1], p2[1]) - r,
-                       std::min(p1[2], p2[2]) - r);
-  octomap::point3d max(std::max(p1[0], p2[0]) + r, std::max(p1[1], p2[1]) + r,
-                       std::max(p1[2], p2[2]) + r);
+  
+  float res = ot->get_resolution();
+  float min_x = std::min(p1[0], p2[0]) - r;
+  float min_y = std::min(p1[1], p2[1]) - r;
+  float min_z = std::min(p1[2], p2[2]) - r;
+  float max_x = std::max(p1[0], p2[0]) + r;
+  float max_y = std::max(p1[1], p2[1]) + r;
+  float max_z = std::max(p1[2], p2[2]) + r;
   double lsq = (end - start).norm_sq();
   double rsq = r * r;
 
-  for (octomap::OcTree::leaf_bbx_iterator it = ot->begin_leafs_bbx(min, max),
-                                          it_end = ot->end_leafs_bbx();
-       it != it_end; ++it)
-  {
-    octomap::point3d pt(it.getX(), it.getY(), it.getZ());
-
-    if (it->getLogOdds() > 0)  // Node is occupied
-    {
-      if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r)
-      {
-        return true;
+  for (float x = min_x; x <= max_x; x += res) {
+    for (float y = min_y; y <= max_y; y += res) {
+      for (float z = min_z; z <= max_z; z += res) {
+        la3dm::OcTreeNode node = ot->search(x, y, z);
+        if (node.get_state() == la3dm::State::OCCUPIED) {
+          octomap::point3d pt(x, y, z);
+          if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r) {
+            return true;
+          }
+        }
       }
     }
   }
@@ -547,15 +582,71 @@ bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
   return false;
 }
 
-void AEPlanner::octomapCallback(const octomap_msgs::Octomap& msg)
+void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 {
-  ROS_DEBUG_STREAM("Freeing ot_");
-  octomap::AbstractOcTree* aot = octomap_msgs::msgToMap(msg);
-  octomap::OcTree* ot = (octomap::OcTree*)aot;
-  ot_ = std::make_shared<octomap::OcTree>(*ot);
+  tf::StampedTransform transform;
+  try {
+      // tf_listener_.waitForTransform(params_.world_frame, msg->header.frame_id, msg->header.stamp, ros::Duration(5.0));
+      tf_listener_.lookupTransform(params_.world_frame, msg->header.frame_id, msg->header.stamp, transform);
+  } catch (tf::TransformException ex) {
+      ROS_ERROR("%s", ex.what());
+      return;
+  }
 
-  delete ot;
-  ROS_DEBUG_STREAM("Freeing ot_ done:");
+  la3dm::point3f origin;
+  tf::Vector3 translation = transform.getOrigin();
+  tf::Quaternion orientation = transform.getRotation();
+  
+  tf::Matrix3x3 mat(orientation);
+  tf::Vector3 up = mat.getColumn(2);
+
+  la3dm::point3f sensor_up(up.x(), up.y(), up.z());
+  
+  origin.x() = (float) translation.x();
+  origin.y() = (float) translation.y();
+  origin.z() = (float) translation.z();
+
+  sensor_msgs::PointCloud2 cloud_map;
+  pcl_ros::transformPointCloud(params_.world_frame, *msg, cloud_map, tf_listener_);
+
+  la3dm::PCLPointCloud::Ptr pcl_cloud (new la3dm::PCLPointCloud());
+  pcl::fromROSMsg(cloud_map, *pcl_cloud);
+
+  ot_->insert_pointcloud(*pcl_cloud, origin, sensor_up, ot_->get_resolution(), ot_->get_resolution() * 2, params_.r_max);
+
+  m_pub_occ_->clear();
+  m_pub_free_->clear();
+  m_pub_free_txt_->clear();
+  m_pub_unc_->clear();
+  m_pub_unk_->clear();
+  m_pub_var_->clear();
+
+  float max_var_vis = 0.5f;
+  for (auto it = ot_->begin_leaf(); it != ot_->end_leaf(); ++it) {
+      la3dm::point3f p = it.get_loc();
+      
+      if (it.get_node().get_state() == la3dm::State::OCCUPIED) {
+          m_pub_occ_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
+      } else if (it.get_node().get_state() == la3dm::State::FREE) {
+          m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
+      } else if (it.get_node().get_state() == la3dm::State::UNCERTAIN) {
+          m_pub_unc_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
+      } else if (it.get_node().get_state() == la3dm::State::UNKNOWN) {
+          m_pub_unk_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
+      }
+      
+      auto state = it.get_node().get_state();
+      if (state == la3dm::State::OCCUPIED || state == la3dm::State::FREE || state == la3dm::State::UNCERTAIN) {
+          std::string ns = (state == la3dm::State::OCCUPIED) ? "occupied" : (state == la3dm::State::FREE) ? "free" : "uncertain";
+          m_pub_var_->insert_color_point3d(p.x(), p.y(), p.z(), 0.0, max_var_vis, it.get_node().get_var(), it.get_size(), ns);
+      }
+  }
+
+  m_pub_occ_->publish();
+  m_pub_free_->publish();
+  m_pub_unc_->publish();
+  m_pub_unk_->publish();
+  m_pub_var_->publish();
 }
 
 void AEPlanner::publishEvaluatedNodesRecursive(RRTNode* node)

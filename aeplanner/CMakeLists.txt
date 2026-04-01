@@ -17,10 +17,14 @@ find_package(catkin REQUIRED COMPONENTS
   kdtree
   pigain
   dynamic_reconfigure
+  la3dm
+  pcl_conversions
+  pcl_ros
 )
 find_package(cmake_modules REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(octomap REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(PCL REQUIRED)
 
 add_message_files(
   DIRECTORY msg 
@@ -44,8 +48,8 @@ generate_messages(
 )
 
 catkin_package(
-  INCLUDE_DIRS include ${Eigen_INCLUDE_DIRS} ${OCTOMAP_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS}
-  LIBRARIES aeplanner ${catkin_LIBRARIES} ${OCTOMAP_LIBRARIES}
+  INCLUDE_DIRS include ${Eigen_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS}
+  LIBRARIES aeplanner ${catkin_LIBRARIES}
   CATKIN_DEPENDS message_runtime roscpp geometry_msgs visualization_msgs tf kdtree
 )
 
@@ -53,13 +57,12 @@ include_directories(
   include
   ${catkin_INCLUDE_DIRS}
   ${Eigen_INCLUDE_DIRS}
-  ${OCTOMAP_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
 )
 
 add_library(aeplanner src/aeplanner_nodelet.cpp src/aeplanner.cpp src/aeplanner_viz.cpp src/param.cpp)
 target_link_libraries(aeplanner
   ${catkin_LIBRARIES}
-  ${OCTOMAP_LIBRARIES}
 )
 add_dependencies(aeplanner
   ${catkin_EXPORTED_TARGETS} 
@@ -71,7 +74,6 @@ add_dependencies(aeplanner
 add_executable(aeplanner_node src/aeplanner_node.cpp src/aeplanner.cpp src/aeplanner_viz.cpp src/param.cpp)
 target_link_libraries(aeplanner_node
   ${catkin_LIBRARIES}
-  ${OCTOMAP_LIBRARIES}
 )
 add_dependencies(aeplanner_node
   ${catkin_EXPORTED_TARGETS} 

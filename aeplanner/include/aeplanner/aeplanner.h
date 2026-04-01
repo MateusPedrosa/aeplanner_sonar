@@ -8,8 +8,11 @@
 
 #include <tf/transform_listener.h>
 
-#include <octomap/octomap.h>
-#include <octomap_msgs/conversions.h>
+#include <bgkloctomap/bgkloctomap.h>
+#include <sensor_msgs/PointCloud2.h>
+#include <pcl_ros/transforms.h>
+#include <pcl_conversions/pcl_conversions.h>
+#include <common/markerarray_pub.h>
 
 #include <eigen3/Eigen/Dense>
 
@@ -50,13 +53,16 @@ private:
   RRTNode* best_node_;
   RRTNode* best_branch_root_;
 
-  std::shared_ptr<octomap::OcTree> ot_;
+  std::shared_ptr<la3dm::BGKLOctoMap> ot_;
+
+  la3dm::MarkerArrayPub *m_pub_occ_, *m_pub_free_, *m_pub_unc_, *m_pub_unk_, *m_pub_var_;
+  la3dm::TextMarkerArrayPub *m_pub_free_txt_;
 
   // kd tree for finding nearest neighbours
   kdtree* kd_tree_;
 
   // Subscribers
-  ros::Subscriber octomap_sub_;
+  ros::Subscriber point_sub_;
   ros::Subscriber agent_pose_sub_;
 
   // Publishers
@@ -111,7 +117,7 @@ public:
 
   void execute(const aeplanner::aeplannerGoalConstPtr& goal);
 
-  void octomapCallback(const octomap_msgs::Octomap& msg);
+  void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
   void agentPoseCallback(const geometry_msgs::PoseStamped& msg);
 };
 
