@@ -1,6 +1,6 @@
 #include <ros/ros.h>
-
 #include <aeplanner/param.h>
+#include <cmath>
 
 namespace aeplanner
 {
@@ -17,14 +17,14 @@ namespace aeplanner
     if (!ros::param::get(ns + "/camera/vertical_fov", params.vfov)) {
       ROS_WARN_STREAM("No vertical fov specified. Default: " << params.vfov);
     }
-    params.dr = 0.1;
-    if (!ros::param::get("/octomap_server/resolution", params.dr)) {
-      ROS_WARN_STREAM("Could not read octomap resolution. Looking for /octomap_server/resolution.");
-      ROS_WARN_STREAM("Using resolution specified by param file instead");
-    }
-    else if (!ros::param::get(ns + "/raycast/dr", params.dr)) {
-      ROS_WARN_STREAM("No dr specified. Default: " << params.dr);
-    }
+    // params.dr = 0.1;
+    // if (!ros::param::get("/octomap_server/resolution", params.dr)) {
+    //   ROS_WARN_STREAM("Could not read octomap resolution. Looking for /octomap_server/resolution.");
+    //   ROS_WARN_STREAM("Using resolution specified by param file instead");
+    // }
+    // else if (!ros::param::get(ns + "/raycast/dr", params.dr)) {
+    //   ROS_WARN_STREAM("No dr specified. Default: " << params.dr);
+    // }
     params.dphi = 10;
     if (!ros::param::get(ns + "/raycast/dphi", params.dphi)) {
       ROS_WARN_STREAM("No dphi specified. Default: " << params.dphi);
@@ -67,7 +67,7 @@ namespace aeplanner
     if (!ros::param::get(ns + "/boundary/max", params.boundary_max)) {
       ROS_WARN_STREAM("No boundary/max specified.");
     }
-    params.bounding_radius;
+    params.bounding_radius = 0.5;
     if (!ros::param::get(ns + "/system/bbx/r", params.bounding_radius)) {
       ROS_WARN_STREAM("No /system/bbx/r specified. Default: " << params.bounding_radius);
     }
@@ -106,6 +106,64 @@ namespace aeplanner
     params.visualize_exploration_area = false;
     if (!ros::param::get(ns + "/visualize_exploration_area", params.visualize_exploration_area)) {
       ROS_WARN_STREAM("No /visualize_exploration_area specified. Default: " << params.visualize_exploration_area);
+    }
+
+    // --- BGKLOctoMap Parameters ---
+    params.resolution = 0.2;
+    if (!ros::param::get("resolution", params.resolution)) {
+      ROS_WARN_STREAM("No map resolution specified. Default: " << params.resolution);
+    }
+    params.block_depth = 5;
+    if (!ros::param::get("block_depth", params.block_depth)) {
+      ROS_WARN_STREAM("No block_depth specified. Default: " << params.block_depth);
+    }
+    params.sf2 = 0.1;
+    if (!ros::param::get("sf2", params.sf2)) {
+      ROS_WARN_STREAM("No sf2 specified. Default: " << params.sf2);
+    }
+    params.ell = 0.6;
+    if (!ros::param::get("ell", params.ell)) {
+      ROS_WARN_STREAM("No ell specified. Default: " << params.ell);
+    }
+    params.free_thresh = 0.3;
+    if (!ros::param::get("free_thresh", params.free_thresh)) {
+      ROS_WARN_STREAM("No free_thresh specified. Default: " << params.free_thresh);
+    }
+    params.occupied_thresh = 0.7;
+    if (!ros::param::get("occupied_thresh", params.occupied_thresh)) {
+      ROS_WARN_STREAM("No occupied_thresh specified. Default: " << params.occupied_thresh);
+    }
+    params.var_thresh = 100.0f;
+    if (!ros::param::get("var_thresh", params.var_thresh)) {
+      ROS_WARN_STREAM("No var_thresh specified. Default: " << params.var_thresh);
+    }
+    params.prior_A = 0.001f;
+    if (!ros::param::get("prior_A", params.prior_A)) {
+      ROS_WARN_STREAM("No prior_A specified. Default: " << params.prior_A);
+    }
+    params.prior_B = 0.001f;
+    if (!ros::param::get("prior_B", params.prior_B)) {
+      ROS_WARN_STREAM("No prior_B specified. Default: " << params.prior_B);
+    }
+    params.theta_bw = 0.6f * M_PI / 180.0f;
+    if (!ros::param::get("theta_bw", params.theta_bw)) {
+      ROS_WARN_STREAM("No theta_bw specified. Default: " << params.theta_bw);
+    }
+    params.phi_bw = 20.0f * M_PI / 180.0f;
+    if (!ros::param::get("phi_bw", params.phi_bw)) {
+      ROS_WARN_STREAM("No phi_bw specified. Default: " << params.phi_bw);
+    }
+    params.uncertain_threshold = 4.0f;
+    if (!ros::param::get("uncertain_threshold", params.uncertain_threshold)) {
+      ROS_WARN_STREAM("No uncertain_threshold specified. Default: " << params.uncertain_threshold);
+    }
+    params.ds_resolution = 0.2f;
+    if (!ros::param::get("ds_resolution", params.ds_resolution)) {
+      ROS_WARN_STREAM("No ds_resolution specified. Default: " << params.ds_resolution);
+    }
+    params.free_resolution = 0.4f;
+    if (!ros::param::get("free_resolution", params.free_resolution)) {
+      ROS_WARN_STREAM("No free_resolution specified. Default: " << params.free_resolution);
     }
 
     return params;

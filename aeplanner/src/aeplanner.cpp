@@ -22,40 +22,14 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   params_ = readParams();
   as_.start();
 
-  double resolution = 0.2;
-  int block_depth = 5;
-  double sf2 = 0.1;
-  double ell = 0.6;
-  double free_thresh = 0.3;
-  double occupied_thresh = 0.7;
-  float var_thresh = 100.0f;
-  float prior_A = 0.001f;
-  float prior_B = 0.001f;
-  float theta_bw = 0.6f * 3.1415926f / 180.0f;
-  float phi_bw = 20.0f * 3.1415926f / 180.0f;
+  ot_ = std::make_shared<la3dm::BGKLOctoMap>(params_.resolution, params_.block_depth, params_.sf2, params_.ell, params_.free_thresh, params_.occupied_thresh, params_.var_thresh, params_.prior_A, params_.prior_B, params_.theta_bw, params_.phi_bw);
 
-  ros::NodeHandle nh_priv("~");
-  nh_priv.param<double>("resolution", resolution, resolution);
-  nh_priv.param<int>("block_depth", block_depth, block_depth);
-  nh_priv.param<double>("sf2", sf2, sf2);
-  nh_priv.param<double>("ell", ell, ell);
-  nh_priv.param<double>("free_thresh", free_thresh, free_thresh);
-  nh_priv.param<double>("occupied_thresh", occupied_thresh, occupied_thresh);
-  nh_priv.param<float>("var_thresh", var_thresh, var_thresh);
-  nh_priv.param<float>("prior_A", prior_A, prior_A);
-  nh_priv.param<float>("prior_B", prior_B, prior_B);
-  nh_priv.param<float>("theta_bw", theta_bw, theta_bw);
-  nh_priv.param<float>("phi_bw", phi_bw, phi_bw);
-
-  ot_ = std::make_shared<la3dm::BGKLOctoMap>(resolution, block_depth, sf2, ell, free_thresh, occupied_thresh, var_thresh, prior_A, prior_B, theta_bw, phi_bw);
-
-  m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/occupied_cells_vis_array", resolution);
-  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", resolution);
-  m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", resolution);
-  m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/uncertain_cells_vis_array", resolution);
-  m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", resolution);
-  m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/variance_vis_array", resolution);
-
+  m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/occupied_cells_vis_array", params_.resolution);
+  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", params_.resolution);
+  m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", params_.resolution);
+  m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/uncertain_cells_vis_array", params_.resolution);
+  m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", params_.resolution);
+  m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/variance_vis_array", params_.resolution);
   // Initialize kd-tree
   kd_tree_ = kd_create(3);
 }
@@ -399,7 +373,7 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
   // This function computes the gain
   double hfov = params_.hfov, vfov = params_.vfov;
 
-  double dr = params_.dr, dphi = params_.dphi, dtheta = params_.dtheta;
+  double dr = params_.resolution, dphi = params_.dphi, dtheta = params_.dtheta;
   double dphi_rad = M_PI * dphi / 180.0f, dtheta_rad = M_PI * dtheta / 180.0f;
   double r;
   int body_yaw, phi, theta;
@@ -474,15 +448,13 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
           Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
           if (!isInsideBoundaries(v))
             break;
-          if (result.get_state() != la3dm::State::UNKNOWN)
-          {
-            // Break if occupied so we don't count any information gain behind a wall.
-            if (result.get_state() == la3dm::State::OCCUPIED)
-              break;
-          }
-          else
-            g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) *
-                sin(dphi_rad / 2);
+          // Break if occupied so we don't count any information gain behind a wall.
+          if (result.get_state() == la3dm::State::OCCUPIED)
+            break;
+          else if (result.get_state() != la3dm::State::UNCERTAIN && r < params_.uncertain_threshold)
+            g += 2 * (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
+          else if (result.get_state() != la3dm::State::UNKNOWN)
+            g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
         }
       }
     }
@@ -612,7 +584,7 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   la3dm::PCLPointCloud::Ptr pcl_cloud (new la3dm::PCLPointCloud());
   pcl::fromROSMsg(cloud_map, *pcl_cloud);
 
-  ot_->insert_pointcloud(*pcl_cloud, origin, sensor_up, ot_->get_resolution(), ot_->get_resolution() * 2, params_.r_max);
+  ot_->insert_pointcloud(*pcl_cloud, origin, sensor_up, params_.ds_resolution, params_.free_resolution, params_.r_max);
 
   m_pub_occ_->clear();
   m_pub_free_->clear();

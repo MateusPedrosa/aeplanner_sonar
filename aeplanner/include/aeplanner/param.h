@@ -1,6 +1,9 @@
 #ifndef READ_PARAMS_H
 #define READ_PARAMS_H
 
+#include <vector>
+#include <string>
+
 namespace aeplanner
 {
   struct Params
@@ -36,6 +39,22 @@ namespace aeplanner
     bool visualize_tree;
     bool visualize_rays;
     bool visualize_exploration_area;
+
+    // BGKLOctoMap parameters
+    double resolution;
+    int block_depth;
+    double sf2;
+    double ell;
+    double free_thresh;
+    double occupied_thresh;
+    float var_thresh;
+    float prior_A;
+    float prior_B;
+    float theta_bw;
+    float phi_bw;
+    float uncertain_threshold;
+    float free_resolution;
+    float ds_resolution;
   };
 
   Params readParams();
