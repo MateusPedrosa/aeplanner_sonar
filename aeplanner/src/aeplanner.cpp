@@ -450,11 +450,16 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
             break;
           // Break if occupied so we don't count any information gain behind a wall.
           if (result.get_state() == la3dm::State::OCCUPIED)
-            break;
-          else if (result.get_state() != la3dm::State::UNCERTAIN && r < params_.uncertain_threshold)
+            break; // No gain from cells behind an occupied cell
+          else if (result.get_state() == la3dm::State::UNCERTAIN)
+            {
+              if (r < params_.uncertain_threshold)
             g += 2 * (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
-          else if (result.get_state() != la3dm::State::UNKNOWN)
+break; // No gain from cells behind an uncertain cell
+            }
+          else if (result.get_state() == la3dm::State::UNKNOWN)
             g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
+}
         }
       }
     }
