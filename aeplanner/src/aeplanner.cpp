@@ -545,7 +545,7 @@ bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
     for (float y = min_y; y <= max_y; y += res) {
       for (float z = min_z; z <= max_z; z += res) {
         la3dm::OcTreeNode node = ot->search(x, y, z);
-        if (node.get_state() == la3dm::State::OCCUPIED) {
+        if (node.get_state() != la3dm::State::FREE) {
           octomap::point3d pt(x, y, z);
           if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r) {
             return true;
