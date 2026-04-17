@@ -52,9 +52,14 @@ namespace aeplanner
     float prior_B;
     float theta_bw;
     float phi_bw;
+    bool  free_ray_range_weight;
+    float tau_var;
+    float tau_info;
     float uncertain_threshold;
     float free_resolution;
     float ds_resolution;
+    double min_z;
+    double max_z;
   };
 
   Params readParams();

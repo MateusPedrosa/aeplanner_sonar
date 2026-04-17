@@ -33,3 +33,21 @@ robot_frame: "base_link"
 world_frame: "map"
 sensor_frame: "sonar_link"
 
+# BGKLOctoMap parameters — matching bgkloctomap_large_map.yaml
+resolution: 0.2
+block_depth: 5
+sf2: 1.0
+ell: 0.6
+free_resolution: 0.4
+ds_resolution: -1.0
+free_thresh: 0.3
+occupied_thresh: 0.7
+prior_A: 0.001
+prior_B: 0.001
+var_thresh: 100.0
+min_z: -3.0
+max_z: 3.0
+free_ray_range_weight: false
+tau_var: 0.01
+tau_info: 0.5
+

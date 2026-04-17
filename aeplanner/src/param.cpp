@@ -109,7 +109,7 @@ namespace aeplanner
     }
 
     // --- BGKLOctoMap Parameters ---
-    params.resolution = 0.2;
+    params.resolution = 0.05;
     if (!ros::param::get("resolution", params.resolution)) {
       ROS_WARN_STREAM("No map resolution specified. Default: " << params.resolution);
     }
@@ -117,7 +117,7 @@ namespace aeplanner
     if (!ros::param::get("block_depth", params.block_depth)) {
       ROS_WARN_STREAM("No block_depth specified. Default: " << params.block_depth);
     }
-    params.sf2 = 0.1;
+    params.sf2 = 1.0;
     if (!ros::param::get("sf2", params.sf2)) {
       ROS_WARN_STREAM("No sf2 specified. Default: " << params.sf2);
     }
@@ -153,17 +153,37 @@ namespace aeplanner
     if (!ros::param::get("phi_bw", params.phi_bw)) {
       ROS_WARN_STREAM("No phi_bw specified. Default: " << params.phi_bw);
     }
+    params.free_ray_range_weight = false;
+    if (!ros::param::get("free_ray_range_weight", params.free_ray_range_weight)) {
+      ROS_WARN_STREAM("No free_ray_range_weight specified. Default: " << params.free_ray_range_weight);
+    }
+    params.tau_var = 0.01f;
+    if (!ros::param::get("tau_var", params.tau_var)) {
+      ROS_WARN_STREAM("No tau_var specified. Default: " << params.tau_var);
+    }
+    params.tau_info = 0.5f;
+    if (!ros::param::get("tau_info", params.tau_info)) {
+      ROS_WARN_STREAM("No tau_info specified. Default: " << params.tau_info);
+    }
     params.uncertain_threshold = 4.0f;
     if (!ros::param::get("uncertain_threshold", params.uncertain_threshold)) {
       ROS_WARN_STREAM("No uncertain_threshold specified. Default: " << params.uncertain_threshold);
     }
-    params.ds_resolution = 0.2f;
+    params.ds_resolution = -1.0f;
     if (!ros::param::get("ds_resolution", params.ds_resolution)) {
       ROS_WARN_STREAM("No ds_resolution specified. Default: " << params.ds_resolution);
     }
     params.free_resolution = 0.4f;
     if (!ros::param::get("free_resolution", params.free_resolution)) {
       ROS_WARN_STREAM("No free_resolution specified. Default: " << params.free_resolution);
+    }
+    params.min_z = 0.0;
+    if (!ros::param::get("min_z", params.min_z)) {
+      ROS_WARN_STREAM("No min_z specified. Default: " << params.min_z);
+    }
+    params.max_z = 0.0;
+    if (!ros::param::get("max_z", params.max_z)) {
+      ROS_WARN_STREAM("No max_z specified. Default: " << params.max_z);
     }
 
     return params;

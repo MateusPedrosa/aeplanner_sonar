@@ -22,13 +22,16 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   params_ = readParams();
   as_.start();
 
-  ot_ = std::make_shared<la3dm::BGKLOctoMap>(params_.resolution, params_.block_depth, params_.sf2, params_.ell, params_.free_thresh, params_.occupied_thresh, params_.var_thresh, params_.prior_A, params_.prior_B, params_.theta_bw, params_.phi_bw);
+  ot_ = std::make_shared<la3dm::BGKLOctoMap>(params_.resolution, params_.block_depth, params_.sf2, params_.ell, params_.free_thresh, params_.occupied_thresh, params_.var_thresh, params_.prior_A, params_.prior_B, params_.theta_bw, params_.phi_bw, params_.free_ray_range_weight);
+
+  la3dm::OcTreeNode::tau_var  = params_.tau_var;
+  la3dm::OcTreeNode::tau_info = params_.tau_info;
 
   m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/occupied_cells_vis_array", params_.resolution);
-  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", params_.resolution);
-  m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", params_.resolution);
+  // m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", params_.resolution);
+  // m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", params_.resolution);
   m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/uncertain_cells_vis_array", params_.resolution);
-  m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", params_.resolution);
+  // m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", params_.resolution);
   m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/variance_vis_array", params_.resolution);
   // Initialize kd-tree
   kd_tree_ = kd_create(3);
@@ -454,12 +457,13 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
           else if (result.get_state() == la3dm::State::UNCERTAIN)
             {
               if (r < params_.uncertain_threshold)
-            g += 2 * (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
-break; // No gain from cells behind an uncertain cell
+              {
+                g += 2 * (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
+              }
+              break; // No gain from cells behind an uncertain cell
             }
           else if (result.get_state() == la3dm::State::UNKNOWN)
             g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
-}
         }
       }
     }
@@ -583,6 +587,13 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   origin.y() = (float) translation.y();
   origin.z() = (float) translation.z();
 
+  size_t expected = (size_t)msg->width * msg->height * msg->point_step;
+  if (msg->data.size() < expected) {
+    ROS_WARN_THROTTLE(1.0, "Malformed PointCloud2: data.size()=%zu < expected=%zu, skipping",
+                      msg->data.size(), expected);
+    return;
+  }
+
   sensor_msgs::PointCloud2 cloud_map;
   pcl_ros::transformPointCloud(params_.world_frame, *msg, cloud_map, tf_listener_);
 
@@ -592,10 +603,10 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   ot_->insert_pointcloud(*pcl_cloud, origin, sensor_up, params_.ds_resolution, params_.free_resolution, params_.r_max);
 
   m_pub_occ_->clear();
-  m_pub_free_->clear();
-  m_pub_free_txt_->clear();
+  // m_pub_free_->clear();
+  // m_pub_free_txt_->clear();
   m_pub_unc_->clear();
-  m_pub_unk_->clear();
+  // m_pub_unk_->clear();
   m_pub_var_->clear();
 
   float max_var_vis = 0.5f;
@@ -603,26 +614,26 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
       la3dm::point3f p = it.get_loc();
       
       if (it.get_node().get_state() == la3dm::State::OCCUPIED) {
-          m_pub_occ_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
-      } else if (it.get_node().get_state() == la3dm::State::FREE) {
-          m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
+            m_pub_occ_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
+        // } else if (it.get_node().get_state() == la3dm::State::FREE) {
+        //     m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size(), it.get_node().get_prob());
       } else if (it.get_node().get_state() == la3dm::State::UNCERTAIN) {
-          m_pub_unc_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
-      } else if (it.get_node().get_state() == la3dm::State::UNKNOWN) {
-          m_pub_unk_->insert_point3d(p.x(), p.y(), p.z(), -10.0, 10.0, it.get_size());
+            m_pub_unc_->insert_point3d_color(p.x(), p.y(), p.z(), it.get_size(), 1.0f, 1.0f, 0.0f);
+        // } else if (it.get_node().get_state() == la3dm::State::UNKNOWN) {
+        //     m_pub_unk_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
       }
       
       auto state = it.get_node().get_state();
-      if (state == la3dm::State::OCCUPIED || state == la3dm::State::FREE || state == la3dm::State::UNCERTAIN) {
-          std::string ns = (state == la3dm::State::OCCUPIED) ? "occupied" : (state == la3dm::State::FREE) ? "free" : "uncertain";
+        if (state == la3dm::State::OCCUPIED || state == la3dm::State::UNCERTAIN) {
+            std::string ns = (state == la3dm::State::OCCUPIED) ? "occupied" : "uncertain";
           m_pub_var_->insert_color_point3d(p.x(), p.y(), p.z(), 0.0, max_var_vis, it.get_node().get_var(), it.get_size(), ns);
       }
   }
 
   m_pub_occ_->publish();
-  m_pub_free_->publish();
+  // m_pub_free_->publish();
   m_pub_unc_->publish();
-  m_pub_unk_->publish();
+  // m_pub_unk_->publish();
   m_pub_var_->publish();
 }
 
