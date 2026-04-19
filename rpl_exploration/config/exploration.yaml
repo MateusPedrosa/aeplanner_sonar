@@ -9,12 +9,12 @@ system/bbx/r: 0.75
 system/bbx/overshoot: 0.25
 
 aep/gain/r_min: 0.1
-aep/gain/r_max: 40
+aep/gain/r_max: 20
 aep/gain/zero: 100
 aep/gain/lambda: 0.1
 aep/gain/sigma_thresh: 0.2
-aep/tree/extension_range: 1
-aep/tree/max_sampling_radius: 20
+aep/tree/extension_range: 0.75
+aep/tree/max_sampling_radius: 10
 aep/tree/initial_iterations: 15
 aep/tree/cutoff_iterations: 30
 
@@ -39,7 +39,7 @@ block_depth: 5
 sf2: 1.0
 ell: 0.6
 free_resolution: 0.4
-ds_resolution: -1.0
+ds_resolution: 0.2
 free_thresh: 0.3
 occupied_thresh: 0.7
 prior_A: 0.001

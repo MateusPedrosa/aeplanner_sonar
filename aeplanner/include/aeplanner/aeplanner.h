@@ -3,6 +3,9 @@
 
 #include <ros/ros.h>
 
+#include <mutex>
+#include <shared_mutex>
+
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/PoseArray.h>
 
@@ -54,9 +57,19 @@ private:
   RRTNode* best_branch_root_;
 
   std::shared_ptr<la3dm::BGKLOctoMap> ot_;
+  // Reader-writer lock for ot_:
+  //   cloudCallback (insert_pointcloud) → unique_lock (exclusive write)
+  //   gainCubature / collisionLine (search) → shared_lock (concurrent reads)
+  //   publishMapViz (begin_leaf iteration) → try shared_lock, skip if writer active
+  // Multiple readers proceed simultaneously; only the writer blocks all.
+  mutable std::shared_mutex ot_mutex_;
 
   la3dm::MarkerArrayPub *m_pub_occ_, *m_pub_free_, *m_pub_unc_, *m_pub_unk_, *m_pub_var_;
   la3dm::TextMarkerArrayPub *m_pub_free_txt_;
+
+  // Timer that drives voxel visualization independently of the sonar
+  // callback, so a growing map does not starve cloudCallback.
+  ros::Timer viz_timer_;
 
   // kd tree for finding nearest neighbours
   kdtree* kd_tree_;
@@ -119,6 +132,7 @@ public:
 
   void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
   void agentPoseCallback(const geometry_msgs::PoseStamped& msg);
+  void publishMapViz(const ros::TimerEvent&);
 };
 
 }  // namespace aeplanner

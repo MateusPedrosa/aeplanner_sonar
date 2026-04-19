@@ -61,21 +61,33 @@ int main(int argc, char** argv)
   geometry_msgs::PoseStamped::ConstPtr init_pose =
       ros::topic::waitForMessage<geometry_msgs::PoseStamped>("/oceansim/robot/pose"); // "/mavros/local_position/pose"
   double init_yaw = tf2::getYaw(init_pose->pose.orientation);
-  // Up 2 meters and then forward one meter
-  double initial_positions[8][4] = {
-    { init_pose->pose.position.x, init_pose->pose.position.y,
-      init_pose->pose.position.z + 2.0, init_yaw },
-    { init_pose->pose.position.x + 1.0 * std::cos(init_yaw),
-      init_pose->pose.position.y + 1.0 * std::sin(init_yaw),
-      init_pose->pose.position.z + 2.0, init_yaw },
-  };
+  double init_x    = init_pose->pose.position.x;
+  double init_y    = init_pose->pose.position.y;
+  double init_z    = init_pose->pose.position.z;
+  double init_z_up = init_z + 2.0;
+  double yaw90     = init_yaw + M_PI / 2.0;
 
+  // Initialization motion:
+  //  1. Rise to +2 m
+  //  2-5. Spin 360° in 4×90° steps to carve free space in all directions
+  //  6. Forward 2 m (carve ahead, stay here)
+  double fwd_x = init_x + 2.0 * std::cos(init_yaw);
+  double fwd_y = init_y + 2.0 * std::sin(init_yaw);
+  double initial_positions[6][4] = {
+    { init_x,  init_y,  init_z_up, init_yaw },               // 1 – rise
+    { init_x,  init_y,  init_z_up, init_yaw + M_PI / 2.0 },  // 2 – +90°
+    { init_x,  init_y,  init_z_up, init_yaw + M_PI },         // 3 – +180°
+    { init_x,  init_y,  init_z_up, init_yaw + 3*M_PI / 2.0},  // 4 – +270°
+    { init_x,  init_y,  init_z_up, init_yaw },               // 5 – back to original yaw
+    { fwd_x,   fwd_y,   init_z_up, init_yaw },               // 6 – forward
+  };
+  const int n_init = 6;
   // This is the initialization motion, necessary that the known free space
   // allows the planning of initial paths.
   ROS_INFO("Starting the planner: Performing initialization motion");
   geometry_msgs::PoseStamped last_pose;
 
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < n_init; ++i)
   {
     rpl_exploration::FlyToGoal goal;
     goal.pose.pose.position.x = initial_positions[i][0];
@@ -85,7 +97,7 @@ int main(int argc, char** argv)
         tf::createQuaternionMsgFromYaw(initial_positions[i][3]);
     last_pose.pose = goal.pose.pose;
 
-    ROS_INFO_STREAM("Sending initial goal...");
+    ROS_INFO_STREAM("Sending initial goal " << i + 1 << "/" << n_init << " ...");
     ac.sendGoal(goal);
 
     ac.waitForResult(ros::Duration(0));
@@ -93,7 +105,6 @@ int main(int argc, char** argv)
     last_pose.header.stamp = ros::Time::now();
     last_pose.header.frame_id = "map";
     pub.publish(last_pose);
-    ros::Duration(2.0).sleep(); // Wait 2 seconds before sending the next one
   }
 
   // Start planning: The planner is called and the computed path sent to the
@@ -147,6 +158,15 @@ int main(int argc, char** argv)
       rrt_goal.start.pose = last_pose.pose;
       if (!aep_ac.getResult()->frontiers.poses.size())
       {
+        // On early iterations the map may still be mostly UNKNOWN and pigain has
+        // no frontiers yet — don't quit, just wait for more sonar data and retry.
+        if (iteration < 5)
+        {
+          ROS_WARN_STREAM("No frontiers (iteration " << iteration
+            << "); map may still be initialising. Waiting 2 s before retrying...");
+          ros::Duration(2.0).sleep();
+          continue;
+        }
         ROS_WARN("Exploration complete!");
         break;
       }

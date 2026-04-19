@@ -28,13 +28,16 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   la3dm::OcTreeNode::tau_info = params_.tau_info;
 
   m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/occupied_cells_vis_array", params_.resolution);
-  // m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", params_.resolution);
+  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", params_.resolution);
   // m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", params_.resolution);
   m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/uncertain_cells_vis_array", params_.resolution);
   // m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", params_.resolution);
   m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/variance_vis_array", params_.resolution);
   // Initialize kd-tree
   kd_tree_ = kd_create(3);
+
+  double viz_period = (params_.viz_rate > 0.0) ? (1.0 / params_.viz_rate) : 0.5;
+  viz_timer_ = nh_.createTimer(ros::Duration(viz_period), &AEPlanner::publishMapViz, this);
 }
 
 void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
@@ -64,6 +67,21 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     expandRRT();
   else
     best_node_ = root->children_[0];
+
+  // expandRRT can exhaust its sampling budget without finding any feasible
+  // node (e.g. when the map is still mostly UNKNOWN right after the init
+  // motion). Return a non-clear result with frontiers so rpl_exploration can
+  // fall back to the RRT-to-frontiers branch instead of the action hanging.
+  if (!best_node_)
+  {
+    ROS_WARN("expandRRT returned no feasible node; reporting non-clear result so driver can re-route.");
+    result.is_clear = false;
+    result.frontiers = getFrontiers();
+    as_.setSucceeded(result);
+    delete root;
+    kd_free(kd_tree_);
+    return;
+  }
 
   ROS_DEBUG("getCopyOfParent");
   best_branch_root_ = best_node_->getCopyOfParentBranch();
@@ -165,6 +183,39 @@ void AEPlanner::expandRRT()
        ++n)
   {
     ROS_DEBUG_STREAM("In expand RRT iteration: " << n);
+
+    // --- One-shot diagnostics on the very first iteration ---
+    if (n == 0) {
+      ROS_WARN_STREAM("[DIAG] expandRRT: robot at ("
+        << current_state_[0] << ", " << current_state_[1] << ", " << current_state_[2]
+        << "), sampling_radius=" << params_.max_sampling_radius);
+      // Count octree leaves by state near the robot
+      std::shared_lock<std::shared_mutex> diag_lock(ot_mutex_);
+      size_t free_ct = 0, occ_ct = 0, unk_ct = 0, unc_ct = 0;
+      la3dm::point3f robot_pt((float)current_state_[0], (float)current_state_[1], (float)current_state_[2]);
+      for (auto it = ot->begin_leaf_in_sphere(robot_pt, 10.0f); it != ot->end_leaf(); ++it) {
+        la3dm::State s = (*it).get_state();
+        if (s == la3dm::State::FREE)            ++free_ct;
+        else if (s == la3dm::State::OCCUPIED)   ++occ_ct;
+        else if (s == la3dm::State::UNCERTAIN)  ++unc_ct;
+        else                                    ++unk_ct;
+      }
+      ROS_WARN_STREAM("[DIAG] octree leaves within 10m: free=" << free_ct
+        << " occupied=" << occ_ct << " uncertain=" << unc_ct << " unknown=" << unk_ct);
+      // Sample 5 random points inside radius and log their state
+      for (int dbg = 0; dbg < 5; ++dbg) {
+        Eigen::Vector4d o = sampleNewPoint();
+        Eigen::Vector4d p = current_state_ + o;
+        la3dm::OcTreeNode r = ot->search(p[0], p[1], p[2]);
+        const char* st = (r.get_state()==la3dm::State::FREE) ? "FREE" :
+                         (r.get_state()==la3dm::State::OCCUPIED) ? "OCC" :
+                         (r.get_state()==la3dm::State::UNCERTAIN) ? "UNC" : "UNK";
+        ROS_WARN_STREAM("[DIAG] sample " << dbg << ": ("
+          << p[0] << "," << p[1] << "," << p[2] << ") -> " << st);
+      }
+    }
+    // ---------------------------------------------------------
+
     RRTNode* new_node = new RRTNode();
     RRTNode* nearest;
     la3dm::OcTreeNode ot_result;
@@ -175,31 +226,43 @@ void AEPlanner::expandRRT()
     // (3) the path between the new node and it's parent does not contain any
     // obstacles
 
-    do
-    {
-      Eigen::Vector4d offset = sampleNewPoint();
-      new_node->state_ = current_state_ + offset;
+    bool sample_found = false;
+    int unknown_count = 0, collision_count = 0, oob_count = 0;
+    const int fast_tries = std::min(100, params_.max_sampling_attempts);
 
+    auto try_candidate = [&](Eigen::Vector4d candidate) -> bool {
+      new_node->state_ = candidate;
       nearest = chooseParent(new_node, params_.extension_range);
-
       new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
+      {
+        std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+        ot_result = ot->search(new_node->state_[0], new_node->state_[1], new_node->state_[2]);
+      }
+      if (ot_result.get_state() == la3dm::State::UNKNOWN) { ++unknown_count; return false; }
+      if (!isInsideBoundaries(new_node->state_))           { ++oob_count;     return false; }
+      if (collisionLine(nearest->state_, new_node->state_, params_.bounding_radius))
+                                                           { ++collision_count; return false; }
+      return true;
+    };
 
-      ROS_DEBUG_STREAM("Trying node (" << new_node->state_[0] << ", "
-                                       << new_node->state_[1] << ", "
-                                       << new_node->state_[2] << ")");
-      ROS_DEBUG_STREAM("    nearest (" << nearest->state_[0] << ", " << nearest->state_[1]
-                                       << ", " << nearest->state_[2] << ")");
-      ot_result = ot->search(new_node->state_[0], new_node->state_[1], new_node->state_[2]);
-      if (ot_result.get_state() == la3dm::State::UNKNOWN)
-        continue;
-      ROS_DEBUG_STREAM("ot check done!");
+    for (int tries = 0; tries < fast_tries && !sample_found && ros::ok(); ++tries)
+    {
+      if (try_candidate(current_state_ + sampleNewPoint()))
+        sample_found = true;
+    }
 
-      ROS_DEBUG_STREAM("Inside boundaries?  " << isInsideBoundaries(new_node->state_));
-      ROS_DEBUG_STREAM("In known space?     " << ot_result);
-      ROS_DEBUG_STREAM("Collision?          " << collisionLine(
-                           nearest->state_, new_node->state_, params_.bounding_radius));
-    } while (!isInsideBoundaries(new_node->state_) or ot_result.get_state() == la3dm::State::UNKNOWN or
-             collisionLine(nearest->state_, new_node->state_, params_.bounding_radius));
+    if (!sample_found)
+    {
+      ROS_WARN_STREAM("expandRRT: no feasible sample after "
+                      << params_.max_sampling_attempts
+                      << " tries (unknown=" << unknown_count
+                      << ", collision=" << collision_count
+                      << ", oob=" << oob_count
+                      << ") at iter " << n << ". Stopping expansion."
+                      << " Map may still be mostly UNKNOWN — check sonar TF and insert_pointcloud rate.");
+      delete new_node;
+      break;
+    }
 
     ROS_DEBUG_STREAM("New node (" << new_node->state_[0] << ", " << new_node->state_[1]
                                   << ", " << new_node->state_[2] << ")");
@@ -372,6 +435,11 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 {
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
+  // Shared read lock: concurrent gainCubature calls are fine; only blocks
+  // during cloudCallback's write (insert_pointcloud).
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Waiting for shared_lock (read)");
+  std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Acquired shared_lock");
 
   // This function computes the gain
   double hfov = params_.hfov, vfov = params_.vfov;
@@ -494,6 +562,7 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
   double yaw = best_yaw_deg * M_PI / 180.f;
 
   state[3] = yaw;
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Releasing shared_lock and returning");
   return std::make_pair(best_yaw_score, yaw);
 }
 
@@ -531,10 +600,13 @@ bool AEPlanner::isInsideBoundaries(Eigen::Vector4d point)
 bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
 {
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Waiting for shared_lock (read)");
+  std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Acquired shared_lock");
   ROS_DEBUG_STREAM("In collision");
   octomap::point3d start(p1[0], p1[1], p1[2]);
   octomap::point3d end(p2[0], p2[1], p2[2]);
-  
+
   float res = ot->get_resolution();
   float min_x = std::min(p1[0], p2[0]) - r;
   float min_y = std::min(p1[1], p2[1]) - r;
@@ -552,6 +624,7 @@ bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
         if (node.get_state() != la3dm::State::FREE) {
           octomap::point3d pt(x, y, z);
           if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r) {
+            ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Releasing shared_lock and returning true");
             return true;
           }
         }
@@ -560,6 +633,7 @@ bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
   }
   ROS_DEBUG_STREAM("In collision (exiting)");
 
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Releasing shared_lock and returning false");
   return false;
 }
 
@@ -567,22 +641,24 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 {
   tf::StampedTransform transform;
   try {
-      // tf_listener_.waitForTransform(params_.world_frame, msg->header.frame_id, msg->header.stamp, ros::Duration(5.0));
-      tf_listener_.lookupTransform(params_.world_frame, msg->header.frame_id, msg->header.stamp, transform);
+      // ros::Time(0) fetches the latest available transform, which is robust
+      // with simulated time where the TF buffer may not yet hold the exact
+      // message timestamp at the start of the simulation.
+      tf_listener_.lookupTransform(params_.world_frame, msg->header.frame_id, ros::Time(0), transform);
   } catch (tf::TransformException ex) {
-      ROS_ERROR("%s", ex.what());
+      ROS_ERROR_THROTTLE(1.0, "cloudCallback TF lookup failed: %s", ex.what());
       return;
   }
 
   la3dm::point3f origin;
   tf::Vector3 translation = transform.getOrigin();
   tf::Quaternion orientation = transform.getRotation();
-  
+
   tf::Matrix3x3 mat(orientation);
   tf::Vector3 up = mat.getColumn(2);
 
   la3dm::point3f sensor_up(up.x(), up.y(), up.z());
-  
+
   origin.x() = (float) translation.x();
   origin.y() = (float) translation.y();
   origin.z() = (float) translation.z();
@@ -600,41 +676,61 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   la3dm::PCLPointCloud::Ptr pcl_cloud (new la3dm::PCLPointCloud());
   pcl::fromROSMsg(cloud_map, *pcl_cloud);
 
+  // Exclusive write lock: blocks all readers (gainCubature, collisionLine,
+  // publishMapViz) while BGK inference modifies block_arr.
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: Waiting for unique_lock (write)");
+  std::unique_lock<std::shared_mutex> lock(ot_mutex_);
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: Acquired unique_lock, inserting pointcloud");
   ot_->insert_pointcloud(*pcl_cloud, origin, sensor_up, params_.ds_resolution, params_.free_resolution, params_.r_max);
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: pointcloud inserted, lock released");
+}
+
+void AEPlanner::publishMapViz(const ros::TimerEvent&)
+{
+  if (!ot_)
+    return;
+
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] publishMapViz: Waiting for shared_lock");
+  std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] publishMapViz: Acquired shared_lock");
 
   m_pub_occ_->clear();
-  // m_pub_free_->clear();
+  m_pub_free_->clear();
   // m_pub_free_txt_->clear();
   m_pub_unc_->clear();
   // m_pub_unk_->clear();
   m_pub_var_->clear();
 
-  float max_var_vis = 0.5f;
-  for (auto it = ot_->begin_leaf(); it != ot_->end_leaf(); ++it) {
-      la3dm::point3f p = it.get_loc();
-      
-      if (it.get_node().get_state() == la3dm::State::OCCUPIED) {
-            m_pub_occ_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
-        // } else if (it.get_node().get_state() == la3dm::State::FREE) {
-        //     m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size(), it.get_node().get_prob());
-      } else if (it.get_node().get_state() == la3dm::State::UNCERTAIN) {
-            m_pub_unc_->insert_point3d_color(p.x(), p.y(), p.z(), it.get_size(), 1.0f, 1.0f, 0.0f);
-        // } else if (it.get_node().get_state() == la3dm::State::UNKNOWN) {
-        //     m_pub_unk_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
-      }
-      
-      auto state = it.get_node().get_state();
-        if (state == la3dm::State::OCCUPIED || state == la3dm::State::UNCERTAIN) {
-            std::string ns = (state == la3dm::State::OCCUPIED) ? "occupied" : "uncertain";
-          m_pub_var_->insert_color_point3d(p.x(), p.y(), p.z(), 0.0, max_var_vis, it.get_node().get_var(), it.get_size(), ns);
-      }
+  const float max_var_vis = 0.5f;
+  la3dm::point3f viz_center((float)current_state_[0], (float)current_state_[1], (float)current_state_[2]);
+  auto leaf_begin = (params_.max_vis_radius > 0.0 and current_state_initialized_)
+                        ? ot_->begin_leaf_in_sphere(viz_center, (float)params_.max_vis_radius)
+                        : ot_->begin_leaf();
+
+  for (auto it = leaf_begin; it != ot_->end_leaf(); ++it) {
+    la3dm::point3f p = it.get_loc();
+    auto state = it.get_node().get_state();
+
+    if (state == la3dm::State::OCCUPIED) {
+      m_pub_occ_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
+    } else if (state == la3dm::State::UNCERTAIN) {
+      m_pub_unc_->insert_point3d_color(p.x(), p.y(), p.z(), it.get_size(), 1.0f, 1.0f, 0.0f);
+    } else if (state == la3dm::State::FREE) {
+      m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
+    }
+
+    if (state == la3dm::State::OCCUPIED || state == la3dm::State::UNCERTAIN) {
+      std::string ns = (state == la3dm::State::OCCUPIED) ? "occupied" : "uncertain";
+      m_pub_var_->insert_color_point3d(p.x(), p.y(), p.z(), 0.0, max_var_vis, it.get_node().get_var(), it.get_size(), ns);
+    }
   }
 
   m_pub_occ_->publish();
-  // m_pub_free_->publish();
+  m_pub_free_->publish();
   m_pub_unc_->publish();
   // m_pub_unk_->publish();
   m_pub_var_->publish();
+  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] publishMapViz: Releasing shared_lock");
 }
 
 void AEPlanner::publishEvaluatedNodesRecursive(RRTNode* node)

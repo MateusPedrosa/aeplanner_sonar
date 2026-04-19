@@ -28,6 +28,10 @@ namespace aeplanner
 
     int init_iterations;
     int cutoff_iterations;
+    int max_sampling_attempts;
+
+    double viz_rate;
+    double max_vis_radius;
 
     std::vector<double> boundary_min;
     std::vector<double> boundary_max;
