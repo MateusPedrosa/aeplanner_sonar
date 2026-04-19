@@ -197,6 +197,10 @@ namespace aeplanner
     if (!ros::param::get("max_z", params.max_z)) {
       ROS_WARN_STREAM("No max_z specified. Default: " << params.max_z);
     }
+    params.nbv_k = 1000;
+    if (!ros::param::get(ns + "/aep/gain/nbv_k", params.nbv_k)) {
+      ROS_WARN_STREAM("No nbv_k specified. Default: " << params.nbv_k);
+    }
 
     return params;
   }

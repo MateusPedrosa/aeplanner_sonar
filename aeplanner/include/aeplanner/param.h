@@ -64,6 +64,8 @@ namespace aeplanner
     float ds_resolution;
     double min_z;
     double max_z;
+
+    int nbv_k;  // top-K voxels used in info-matrix gain scoring (NBV planner)
   };
 
   Params readParams();

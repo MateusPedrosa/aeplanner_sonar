@@ -162,6 +162,7 @@ void AEPlanner::initializeKDTreeWithPreviousBestBranch(RRTNode* root)
 
 void AEPlanner::reevaluatePotentialInformationGainRecursive(RRTNode* node)
 {
+  if (!priority_cache_valid_) computePriorityCache();
   std::pair<double, double> ret = gainCubature(node->state_); // FIXME use gp?
   node->state_[3] = ret.second;  // Assign yaw angle that maximizes g
   node->gain_ = ret.first;
@@ -173,6 +174,13 @@ void AEPlanner::reevaluatePotentialInformationGainRecursive(RRTNode* node)
 void AEPlanner::expandRRT()
 {
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
+
+  // Pre-compute the priority voxel cache once for this planning cycle.
+  // All gainCubature calls within this expandRRT will reuse it, avoiding
+  // the expensive per-node map iteration.
+  priority_cache_valid_ = false;
+  computePriorityCache();
+  ROS_INFO_STREAM("[NBV] Priority cache: " << priority_cache_.size() << " voxels");
 
   // Expand an RRT tree and calculate information gain in every node
   ROS_DEBUG_STREAM("Entering expanding RRT");
@@ -432,113 +440,179 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
   return true;
 }
 
+void AEPlanner::computePriorityCache()
+{
+  // Step 1 of PDF §7: rank voxels by priority = Var_beta × directional_imbalance.
+  // Computed once per planning cycle from the robot's current position so it is
+  // not repeated for every RRT node candidate.
+  priority_cache_.clear();
+
+  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
+  std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+
+  // Use the robot's current base position as the fixed planning origin.
+  la3dm::point3f t_plan_p3f((float)current_state_[0],
+                             (float)current_state_[1],
+                             (float)current_state_[2]);
+  Eigen::Vector3d t_plan(current_state_[0], current_state_[1], current_state_[2]);
+
+  priority_cache_.reserve(4096);
+
+  for (auto it = ot->begin_leaf_in_sphere(t_plan_p3f, (float)params_.r_max);
+       it != ot->end_leaf(); ++it)
+  {
+    la3dm::OcTreeNode &node = it.get_node();
+
+    // Skip voxels that have never been observed (no evidence → no info matrix content)
+    if (!node.classified) continue;
+
+    // Skip voxels whose info matrix is already deallocated (well-constrained)
+    if (!node.has_active_info_matrix()) continue;
+
+    la3dm::point3f p_loc = it.get_loc();
+    Eigen::Vector3d p_k(p_loc.x(), p_loc.y(), p_loc.z());
+
+    Eigen::Vector3d diff = p_k - t_plan;
+    double dist = diff.norm();
+    if (dist < 1e-6) continue;
+
+    la3dm::point3f los_p3f((float)(diff.x()/dist),
+                           (float)(diff.y()/dist),
+                           (float)(diff.z()/dist));
+
+    float lam1, lam2;
+    la3dm::point3f v_weak_p3f;
+    node.get_2d_eigenstruct(los_p3f, lam1, lam2, v_weak_p3f);
+
+    float imbalance = 1.0f - lam2 / (lam1 + 1e-6f);
+    float priority  = node.get_var() * imbalance;
+    if (priority < 1e-8f) continue;
+
+    priority_cache_.push_back({p_k, priority,
+                               Eigen::Vector3d(v_weak_p3f.x(), v_weak_p3f.y(), v_weak_p3f.z())});
+  }
+
+  // Keep top-K by priority.
+  int K = params_.nbv_k;
+  if ((int)priority_cache_.size() > K) {
+    std::nth_element(priority_cache_.begin(), priority_cache_.begin() + K,
+                     priority_cache_.end(),
+                     [](const PriorityVoxel &a, const PriorityVoxel &b) {
+                       return a.priority > b.priority;
+                     });
+    priority_cache_.resize(K);
+  }
+
+  priority_cache_valid_ = true;
+  ROS_DEBUG_STREAM("computePriorityCache: " << priority_cache_.size()
+                   << " priority voxels (r_max=" << params_.r_max << ")");
+}
+
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 {
-  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
-  // Shared read lock: concurrent gainCubature calls are fine; only blocks
-  // during cloudCallback's write (insert_pointcloud).
+  // Step 2 of PDF §7: score each candidate yaw against the pre-ranked priority
+  // voxels. The cache is built once per planning cycle by computePriorityCache().
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Waiting for shared_lock (read)");
   std::shared_lock<std::shared_mutex> lock(ot_mutex_);
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Acquired shared_lock");
 
-  // This function computes the gain
-  double hfov = params_.hfov, vfov = params_.vfov;
+  tf::Vector3 base_origin(state[0], state[1], state[2]);
 
-  double dr = params_.resolution, dphi = params_.dphi, dtheta = params_.dtheta;
-  double dphi_rad = M_PI * dphi / 180.0f, dtheta_rad = M_PI * dtheta / 180.0f;
-  double r;
-  int body_yaw, phi, theta;
-  double body_yaw_rad, theta_rad, phi_rad;
+  tf::StampedTransform base_to_sensor;
+  try {
+    tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame,
+                                 ros::Time(0), base_to_sensor);
+  } catch (tf::TransformException &ex) {
+    ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
+    base_to_sensor.setIdentity();
+  }
+
+  const double hfov_rad = params_.hfov * M_PI / 180.0;
+  const double vfov_rad = params_.vfov * M_PI / 180.0;
+  const double dtheta   = params_.dtheta;
+  const double r_max    = params_.r_max;
+  const double r_min    = params_.r_min;
 
   std::map<int, double> gain_per_yaw;
 
-  // Proposed state of the robot (base_link) in the world frame:
-    tf::Vector3 base_origin(state[0], state[1], state[2]);
-
-  for (body_yaw = -180; body_yaw < 180; body_yaw += dtheta)
+  for (int body_yaw = -180; body_yaw < 180; body_yaw += (int)dtheta)
   {
-    body_yaw_rad = body_yaw * M_PI/ 180.0f;
+    double body_yaw_rad = body_yaw * M_PI / 180.0;
 
     tf::Quaternion base_quat;
-    base_quat.setEuler(0.0, 0.0, body_yaw_rad); // (Roll, Pitch, Yaw)
-    tf::Pose base_pose_in_world(base_quat, base_origin);
+    base_quat.setEuler(0.0, 0.0, body_yaw_rad);
+    tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * base_to_sensor;
 
-    // Transform from base_link to sensor_frame
-    tf::StampedTransform base_to_sensor;
-    try
+    Eigen::Vector3d t_cand(sensor_pose_in_world.getOrigin().x(),
+                           sensor_pose_in_world.getOrigin().y(),
+                           sensor_pose_in_world.getOrigin().z());
+
+    tf::Matrix3x3 sensor_rot     = sensor_pose_in_world.getBasis();
+    tf::Matrix3x3 sensor_rot_inv = sensor_rot.transpose();
+
+    // Sonar z-axis in world frame R[:,2] — used for n_pred (PDF §6)
+    tf::Vector3 z_cand_tf = sensor_rot * tf::Vector3(0.0, 0.0, 1.0);
+    Eigen::Vector3d z_cand(z_cand_tf.x(), z_cand_tf.y(), z_cand_tf.z());
+
+    double score = 0.0;
+
+    for (const PriorityVoxel &pv : priority_cache_)
     {
-      // Static transform between the robot frame and the sensor frame
-      tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame, ros::Time(0), base_to_sensor);
-    }
-    catch (tf::TransformException &ex)
-    {
-      ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
-      base_to_sensor.setIdentity();
-    }
+      // Range check
+      Eigen::Vector3d diff = pv.pos - t_cand;
+      double range = diff.norm();
+      if (range > r_max || range < r_min) continue;
 
-    // Sensor's pose in the world frame
-    tf::Pose sensor_pose_in_world = base_pose_in_world * base_to_sensor;
-    
-    Eigen::Vector3d sensor_origin(sensor_pose_in_world.getOrigin().x(),
-                                  sensor_pose_in_world.getOrigin().y(),
-                                  sensor_pose_in_world.getOrigin().z());
+      // FOV check: azimuth and elevation in sensor frame
+      Eigen::Vector3d los_k = diff / range;
+      tf::Vector3 los_k_sensor = sensor_rot_inv * tf::Vector3(los_k.x(), los_k.y(), los_k.z());
+      double az = std::atan2(los_k_sensor.y(), los_k_sensor.x());
+      double el = std::atan2(los_k_sensor.z(),
+                             std::sqrt(los_k_sensor.x()*los_k_sensor.x() +
+                                       los_k_sensor.y()*los_k_sensor.y()));
+      if (std::fabs(az) > hfov_rad * 0.5 || std::fabs(el) > vfov_rad * 0.5) continue;
 
-    // 3x3 rotation matrix for the sensor to transform the rays
-    tf::Matrix3x3 sensor_rot = sensor_pose_in_world.getBasis();
+      // Boundary check
+      Eigen::Vector4d pv4(pv.pos.x(), pv.pos.y(), pv.pos.z(), 0);
+      if (!isInsideBoundaries(pv4)) continue;
 
-    double g = 0;
-    for (theta = -hfov/2; theta < hfov/2; theta += dtheta)
-    {
-      theta_rad = theta * M_PI / 180.0f;
-      for (phi = 90 - vfov / 2; phi < 90 + vfov / 2; phi += dphi)
+      // Occlusion check via RayCaster — runs only on FOV-surviving voxels
+      // (~7% of K for a 120°×20° sonar), so cost is ~36 × 70 × 40 steps per call.
       {
-        phi_rad = phi * M_PI / 180.0f;
-
-        for (r = params_.r_min; r < params_.r_max; r += dr)
-        {
-          // Calculate the ray vector in the sensor's local frame
-          // Standard spherical to cartesian where X is forward
-          tf::Vector3 ray_local(
-              r * sin(phi_rad) * cos(theta_rad),
-              r * sin(phi_rad) * sin(theta_rad),
-              r * cos(phi_rad)
-          );
-
-          // Rotate the ray to the world frame using the sensor's rotation
-          tf::Vector3 ray_world = sensor_rot * ray_local;
-
-          // The point to query in the world is the sensor's origin + the rotated ray
-          Eigen::Vector3d vec(
-              sensor_origin.x() + ray_world.x(),
-              sensor_origin.y() + ray_world.y(),
-              sensor_origin.z() + ray_world.z()
-          );
-
-          la3dm::OcTreeNode result = ot->search(vec[0], vec[1], vec[2]);
-
-          Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
-          if (!isInsideBoundaries(v))
-            break;
-          // Break if occupied so we don't count any information gain behind a wall.
-          if (result.get_state() == la3dm::State::OCCUPIED)
-            break; // No gain from cells behind an occupied cell
-          else if (result.get_state() == la3dm::State::UNCERTAIN)
-            {
-              if (r < params_.uncertain_threshold)
-              {
-                g += 2 * (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
+        std::shared_ptr<la3dm::BGKLOctoMap> ot_local = ot_;
+        la3dm::point3f t_p3f((float)t_cand.x(), (float)t_cand.y(), (float)t_cand.z());
+        la3dm::point3f pv_p3f((float)pv.pos.x(), (float)pv.pos.y(), (float)pv.pos.z());
+        la3dm::BGKLOctoMap::RayCaster rc(ot_local.get(), t_p3f, pv_p3f);
+        la3dm::point3f rp; la3dm::OcTreeNode rn;
+        la3dm::BlockHashKey rbk; la3dm::OcTreeHashKey rnk;
+        bool occluded = false;
+        while (!rc.end()) {
+          if (rc.next(rp, rn, rbk, rnk)) {
+            if (rn.get_state() == la3dm::State::OCCUPIED) {
+              float dx = rp.x()-pv_p3f.x(), dy = rp.y()-pv_p3f.y(), dz = rp.z()-pv_p3f.z();
+              if (std::sqrt(dx*dx + dy*dy + dz*dz) > (float)params_.resolution) {
+                occluded = true; break;
               }
-              break; // No gain from cells behind an uncertain cell
             }
-          else if (result.get_state() == la3dm::State::UNKNOWN)
-            g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
+          }
         }
+        if (occluded) continue;
       }
+
+      // Predicted constraint direction n_pred = z_cand - dot(z_cand, los_k) * los_k  (PDF §6)
+      Eigen::Vector3d n_pred = z_cand - z_cand.dot(los_k) * los_k;
+      double n_norm = n_pred.norm();
+      if (n_norm < 1e-8) continue;
+      n_pred /= n_norm;
+
+      // Alignment with weak direction (squared dot product — n and -n equivalent)
+      double alignment = std::pow(n_pred.dot(pv.v_weak), 2);
+      score += pv.priority * alignment;
     }
-    gain_per_yaw[body_yaw] = g;
+
+    gain_per_yaw[body_yaw] = score;
   }
 
-  // Debug: log all sampled body yaws and their scores
   ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2] << "):");
   for (const auto& kv : gain_per_yaw)
       ROS_DEBUG_STREAM("  yaw " << std::setw(5) << kv.first << " deg  score: " << kv.second);
@@ -548,22 +622,11 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
         return a.second < b.second;
     });
 
-  int best_yaw_deg = best_it->first;
-  double best_yaw_score = best_it->second;
-
-  ROS_DEBUG_STREAM("  --> best_yaw: " << best_yaw_deg << " deg  score: " << best_yaw_score);
-
-  // double r_max = params_.r_max;
-  // double h_max = params_.hfov / M_PI * 180;
-  // double v_max = params_.vfov / M_PI * 180;
-
-  // gain = best_yaw_score / ((r_max*r_max*r_max/3) * h_max * (1-cos(v_max))) ;
-
-  double yaw = best_yaw_deg * M_PI / 180.f;
-
+  double yaw = best_it->first * M_PI / 180.0;
   state[3] = yaw;
+  ROS_DEBUG_STREAM("  --> best_yaw: " << best_it->first << " deg  score: " << best_it->second);
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Releasing shared_lock and returning");
-  return std::make_pair(best_yaw_score, yaw);
+  return std::make_pair(best_it->second, yaw);
 }
 
 geometry_msgs::PoseArray AEPlanner::getFrontiers()
@@ -621,7 +684,7 @@ bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
     for (float y = min_y; y <= max_y; y += res) {
       for (float z = min_z; z <= max_z; z += res) {
         la3dm::OcTreeNode node = ot->search(x, y, z);
-        if (node.get_state() != la3dm::State::FREE) {
+        if (node.get_state() == la3dm::State::OCCUPIED) {
           octomap::point3d pt(x, y, z);
           if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r) {
             ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Releasing shared_lock and returning true");

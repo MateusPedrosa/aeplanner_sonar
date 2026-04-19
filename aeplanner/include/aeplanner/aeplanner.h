@@ -113,6 +113,17 @@ private:
   std::pair<double, double> getGain(RRTNode* node);
   std::pair<double, double> gainCubature(Eigen::Vector4d state);
 
+  // Priority voxel cache — computed once per planning cycle (expandRRT call)
+  // so that the expensive map iteration in Step 1 is not repeated per RRT node.
+  struct PriorityVoxel {
+    Eigen::Vector3d pos;
+    float           priority;
+    Eigen::Vector3d v_weak;  // world-frame unit weak arc direction
+  };
+  std::vector<PriorityVoxel> priority_cache_;
+  bool priority_cache_valid_ = false;
+  void computePriorityCache();
+
   // ---------------- Helpers ----------------
   //
   void publishEvaluatedNodesRecursive(RRTNode* node);
