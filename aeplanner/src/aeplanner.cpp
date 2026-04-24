@@ -11,7 +11,6 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   , rrt_marker_pub_(nh_.advertise<visualization_msgs::MarkerArray>("rrtree", 1000))
   , gain_pub_(nh_.advertise<pigain::Node>("gain_node", 1000))
   , bbx_marker_pub_(nh_.advertise<visualization_msgs::Marker>("bbx", 1000, true)) // Latched
-  , gp_query_client_(nh_.serviceClient<pigain::Query>("gp_query_server"))
   , reevaluate_server_(nh_.advertiseService("reevaluate", &AEPlanner::reevaluate, this))
   , best_node_client_(nh_.serviceClient<pigain::BestNode>("best_node_server"))
   , current_state_initialized_(false)
@@ -27,17 +26,45 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   la3dm::OcTreeNode::tau_var  = params_.tau_var;
   la3dm::OcTreeNode::tau_info = params_.tau_info;
 
-  m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/occupied_cells_vis_array", params_.resolution);
-  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/free_cells_vis_array", params_.resolution);
-  // m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/free_cells_txt_vis_array", params_.resolution);
-  m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/uncertain_cells_vis_array", params_.resolution);
-  // m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/unknown_cells_vis_array", params_.resolution);
-  m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/variance_vis_array", params_.resolution);
+  m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/occupied_cells_vis_array", params_.resolution);
+  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/free_cells_vis_array", params_.resolution);
+  // m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/bgkloctomap/free_cells_txt_vis_array", params_.resolution);
+  m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/uncertain_cells_vis_array", params_.resolution);
+  // m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/unknown_cells_vis_array", params_.resolution);
+  m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/variance_vis_array", params_.resolution);
   // Initialize kd-tree
   kd_tree_ = kd_create(3);
 
   double viz_period = (params_.viz_rate > 0.0) ? (1.0 / params_.viz_rate) : 0.5;
   viz_timer_ = nh_.createTimer(ros::Duration(viz_period), &AEPlanner::publishMapViz, this);
+
+  // Initialise Target Priority Map (in-process, shares ot_ read-only)
+  TPMParams tpm_params;
+  tpm_params.sigma2_thresh = params_.sigma2_thresh;
+  tpm_params.w_frontier    = params_.w_frontier;
+  tpm_params.cluster_norm  = params_.cluster_norm;
+  tpm_params.R_cluster     = params_.R_cluster;
+  tpm_params.r_max         = (float)params_.r_max;
+  tpm_params.n_fail        = params_.N_fail;
+  tpm_params.t_cooldown    = params_.T_cooldown;
+  tpm_params.nbv_k         = params_.nbv_k;
+  tpm_params.resolution    = params_.resolution;
+  tpm_params.world_frame   = params_.world_frame;
+
+  tpm_ = std::make_unique<TargetPriorityMap>(nh_, ot_, ot_mutex_, tpm_params);
+
+  double tpm_period = (params_.tpm_rate > 0.0) ? (1.0 / params_.tpm_rate) : 0.5;
+  tpm_timer_ = nh_.createTimer(ros::Duration(tpm_period),
+                               &TargetPriorityMap::update,
+                               tpm_.get());
+
+  state_pub_ = nh_.advertise<std_msgs::String>("/viewplanner/state", 1, true);
+
+  hemisphere_sampler_ = std::make_unique<HemisphereSampler>();
+  frontier_sampler_   = std::make_unique<FrontierSampler>();
+
+  state_machine_    = std::make_unique<PlannerStateMachine>();
+  dwell_controller_ = std::make_unique<DwellController>(nh_, ot_, ot_mutex_);
 }
 
 void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
@@ -57,6 +84,81 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     ROS_WARN("No octomap received");
     as_.setSucceeded(result);
     return;
+  }
+
+  // State machine tick — determines EXPLORE/RESOLVE/DWELL/REPOSITION/DONE
+  std::vector<ScoredTarget> tpm_targets;
+  if (tpm_) tpm_targets = tpm_->getTargets();
+
+  PlannerState planner_state =
+      state_machine_->tick(tpm_targets, current_state_, params_);
+
+  // Publish current state for debugging
+  {
+    std_msgs::String state_msg;
+    state_msg.data = plannerStateToString(planner_state);
+    state_pub_.publish(state_msg);
+  }
+
+  // Handle DWELL: skip RRT, hold position and monitor target voxel
+  if (planner_state == PlannerState::DWELL)
+  {
+    dwell_controller_->publishHoldPose();
+    DwellExitReason reason = dwell_controller_->checkExit(current_state_, params_);
+    if (reason != DwellExitReason::NONE)
+    {
+      const ScoredTarget& dt = state_machine_->dwellTarget();
+      if (reason == DwellExitReason::RESOLVED)
+      {
+        ROS_INFO("[DWELL] Target resolved (Var_beta dropped). Recording success.");
+        if (tpm_) tpm_->recordSuccess(dt.pos);
+      }
+      else
+      {
+        ROS_WARN_STREAM("[DWELL] Exiting DWELL: "
+                        << (reason == DwellExitReason::TIMEOUT ? "TIMEOUT" : "FOV_LOST"));
+        if (tpm_) tpm_->recordFailure(dt.pos);
+      }
+      state_machine_->exitDwell();
+    }
+    // Return non-moving result while dwelling
+    result.is_clear = false;
+    as_.setSucceeded(result);
+    return;
+  }
+
+  // Handle DONE: no targets at all
+  if (planner_state == PlannerState::DONE)
+  {
+    ROS_INFO("[VIEWPLANNER] No targets remaining. Mission complete.");
+    result.is_clear = false;
+    as_.setSucceeded(result);
+    return;
+  }
+
+  // REPOSITION: select a global target to bias sampling toward
+  has_reposition_target_ = false;
+  if (planner_state == PlannerState::REPOSITION && !tpm_targets.empty())
+  {
+    const ScoredTarget* global =
+        selectGlobalTarget(tpm_targets, current_state_.head<3>(), params_.local_radius);
+    if (global)
+    {
+      std::shared_lock<std::shared_mutex> map_lk(ot_mutex_);
+      bool reachable = isLikelyReachable(
+          current_state_.head<3>(), global->pos, ot_);
+      map_lk.unlock();
+
+      if (reachable)
+      {
+        reposition_target_     = *global;
+        has_reposition_target_ = true;
+        ROS_INFO_STREAM("[REPOSITION] Global target at ("
+                        << global->pos.x() << ", "
+                        << global->pos.y() << ", "
+                        << global->pos.z() << ") priority=" << global->priority);
+      }
+    }
   }
 
   ROS_DEBUG("Init");
@@ -94,6 +196,21 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
   ROS_DEBUG("publishRecursive");
   publishEvaluatedNodesRecursive(root);
+
+  // If we just arrived at a RESOLVE viewpoint, transition to DWELL
+  if (planner_state == PlannerState::RESOLVE && !tpm_targets.empty())
+  {
+    const ScoredTarget& top = tpm_targets[0];
+    // Check if robot is already at standoff distance from the target
+    double dist_to_target = (current_state_.head<3>() - top.pos).norm();
+    if (dist_to_target < params_.d_standoff * 1.5)
+    {
+      ROS_INFO_STREAM("[RESOLVE] Arrived at standoff. Entering DWELL for target at ("
+                      << top.pos.x() << ", " << top.pos.y() << ", " << top.pos.z() << ")");
+      state_machine_->enterDwell(top);
+      dwell_controller_->startDwell(top, current_state_, params_);
+    }
+  }
 
   ROS_DEBUG("extractPose");
   result.pose.pose = vecToPose(best_branch_root_->children_[0]->state_);
@@ -253,9 +370,45 @@ void AEPlanner::expandRRT()
       return true;
     };
 
+    // Directed sampling: prefer REPOSITION override if set, else top TPM target.
+    // tpm_snapshot kept alive here so active_target pointer remains valid.
+    {
+      std::vector<ScoredTarget> tpm_snapshot;
+      const ScoredTarget* active_target = nullptr;
+
+      if (has_reposition_target_)
+      {
+        active_target = &reposition_target_;
+      }
+      else if (tpm_)
+      {
+        tpm_snapshot  = tpm_->getTargets();
+        if (!tpm_snapshot.empty()) active_target = &tpm_snapshot[0];
+      }
+
+      if (active_target)
+      {
+        DirectedSampler* sampler =
+            (active_target->type == TargetType::E_FREE &&
+             active_target->w_normal < params_.w_normal_thresh)
+            ? static_cast<DirectedSampler*>(frontier_sampler_.get())
+            : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
+
+        auto candidates = sampler->sampleCandidates(
+            *active_target, current_state_, ot, params_);
+        for (const CandidatePose& cp : candidates)
+        {
+          if (try_candidate(cp.state)) { sample_found = true; break; }
+        }
+      }
+    }
+
+    // Fallback: original uniform sampling if directed sampler found nothing.
     for (int tries = 0; tries < fast_tries && !sample_found && ros::ok(); ++tries)
     {
-      if (try_candidate(current_state_ + sampleNewPoint()))
+      Eigen::Vector4d sample = current_state_ + sampleNewPoint();
+      sample[3] = 2.0 * M_PI * (((double)rand()) / ((double)RAND_MAX) - 0.5);
+      if (try_candidate(sample))
         sample_found = true;
     }
 
@@ -282,10 +435,9 @@ void AEPlanner::expandRRT()
     rewire(kd_tree_, nearest, params_.extension_range, params_.bounding_radius,
            params_.d_overshoot_);
 
-    // Calculate potential information gain for new_node
+    // Calculate potential information gain for new_node at its sampled yaw
     ROS_DEBUG_STREAM("Get gain");
     std::pair<double, double> ret = getGain(new_node);
-    new_node->state_[3] = ret.second;  // Assign yaw angle that maximizes g
     new_node->gain_ = ret.first;
     ROS_DEBUG_STREAM("Insert into KDTREE");
     kd_insert3(kd_tree_, new_node->state_[0], new_node->state_[1], new_node->state_[2],
@@ -400,23 +552,6 @@ Eigen::Vector4d AEPlanner::restrictDistance(Eigen::Vector4d nearest,
 
 std::pair<double, double> AEPlanner::getGain(RRTNode* node)
 {
-  pigain::Query srv;
-  srv.request.point.x = node->state_[0];
-  srv.request.point.y = node->state_[1];
-  srv.request.point.z = node->state_[2];
-
-  if (gp_query_client_.call(srv))
-  {
-    if (srv.response.sigma < params_.sigma_thresh)
-    {
-      double gain = srv.response.mu;
-      double yaw = srv.response.yaw;
-
-      ROS_INFO_STREAM("gain impl: " << gain);
-      return std::make_pair(gain, yaw);
-    }
-  }
-
   node->gain_explicitly_calculated_ = true;
   std::pair<double, double> ret = gainCubature(node->state_);
   ROS_INFO_STREAM("gain expl: " << ret.first);
@@ -480,13 +615,14 @@ void AEPlanner::computePriorityCache()
                            (float)(diff.y()/dist),
                            (float)(diff.z()/dist));
 
-    float lam1, lam2;
-    la3dm::point3f v_weak_p3f;
-    node.get_2d_eigenstruct(los_p3f, lam1, lam2, v_weak_p3f);
-
-    float imbalance = 1.0f - lam2 / (lam1 + 1e-6f);
-    float priority  = node.get_var() * imbalance;
+    // Priority = Beta variance only (λ_min/imbalance term removed per design decision)
+    float priority = node.get_var();
     if (priority < 1e-8f) continue;
+
+    // v_weak from info-matrix eigenstruct; used only for alignment in gainCubature()
+    float lam1_unused, lam2_unused;
+    la3dm::point3f v_weak_p3f;
+    node.get_2d_eigenstruct(los_p3f, lam1_unused, lam2_unused, v_weak_p3f);
 
     priority_cache_.push_back({p_k, priority,
                                Eigen::Vector3d(v_weak_p3f.x(), v_weak_p3f.y(), v_weak_p3f.z())});
@@ -510,8 +646,8 @@ void AEPlanner::computePriorityCache()
 
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 {
-  // Step 2 of PDF §7: score each candidate yaw against the pre-ranked priority
-  // voxels. The cache is built once per planning cycle by computePriorityCache().
+  // Evaluate information gain at the yaw given by state[3].
+  // The cache is built once per planning cycle by computePriorityCache().
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Waiting for shared_lock (read)");
   std::shared_lock<std::shared_mutex> lock(ot_mutex_);
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Acquired shared_lock");
@@ -529,104 +665,83 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 
   const double hfov_rad = params_.hfov * M_PI / 180.0;
   const double vfov_rad = params_.vfov * M_PI / 180.0;
-  const double dtheta   = params_.dtheta;
   const double r_max    = params_.r_max;
   const double r_min    = params_.r_min;
 
-  std::map<int, double> gain_per_yaw;
+  tf::Quaternion base_quat;
+  base_quat.setEuler(0.0, 0.0, state[3]);
+  tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * base_to_sensor;
 
-  for (int body_yaw = -180; body_yaw < 180; body_yaw += (int)dtheta)
+  Eigen::Vector3d t_cand(sensor_pose_in_world.getOrigin().x(),
+                         sensor_pose_in_world.getOrigin().y(),
+                         sensor_pose_in_world.getOrigin().z());
+
+  tf::Matrix3x3 sensor_rot     = sensor_pose_in_world.getBasis();
+  tf::Matrix3x3 sensor_rot_inv = sensor_rot.transpose();
+
+  // Sonar z-axis in world frame R[:,2] — used for n_pred (PDF §6)
+  tf::Vector3 z_cand_tf = sensor_rot * tf::Vector3(0.0, 0.0, 1.0);
+  Eigen::Vector3d z_cand(z_cand_tf.x(), z_cand_tf.y(), z_cand_tf.z());
+
+  double score = 0.0;
+
+  for (const PriorityVoxel &pv : priority_cache_)
   {
-    double body_yaw_rad = body_yaw * M_PI / 180.0;
+    // Range check
+    Eigen::Vector3d diff = pv.pos - t_cand;
+    double range = diff.norm();
+    if (range > r_max || range < r_min) continue;
 
-    tf::Quaternion base_quat;
-    base_quat.setEuler(0.0, 0.0, body_yaw_rad);
-    tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * base_to_sensor;
+    // FOV check: azimuth and elevation in sensor frame
+    Eigen::Vector3d los_k = diff / range;
+    tf::Vector3 los_k_sensor = sensor_rot_inv * tf::Vector3(los_k.x(), los_k.y(), los_k.z());
+    double az = std::atan2(los_k_sensor.y(), los_k_sensor.x());
+    double el = std::atan2(los_k_sensor.z(),
+                           std::sqrt(los_k_sensor.x()*los_k_sensor.x() +
+                                     los_k_sensor.y()*los_k_sensor.y()));
+    if (std::fabs(az) > hfov_rad * 0.5 || std::fabs(el) > vfov_rad * 0.5) continue;
 
-    Eigen::Vector3d t_cand(sensor_pose_in_world.getOrigin().x(),
-                           sensor_pose_in_world.getOrigin().y(),
-                           sensor_pose_in_world.getOrigin().z());
+    // Boundary check
+    Eigen::Vector4d pv4(pv.pos.x(), pv.pos.y(), pv.pos.z(), 0);
+    if (!isInsideBoundaries(pv4)) continue;
 
-    tf::Matrix3x3 sensor_rot     = sensor_pose_in_world.getBasis();
-    tf::Matrix3x3 sensor_rot_inv = sensor_rot.transpose();
-
-    // Sonar z-axis in world frame R[:,2] — used for n_pred (PDF §6)
-    tf::Vector3 z_cand_tf = sensor_rot * tf::Vector3(0.0, 0.0, 1.0);
-    Eigen::Vector3d z_cand(z_cand_tf.x(), z_cand_tf.y(), z_cand_tf.z());
-
-    double score = 0.0;
-
-    for (const PriorityVoxel &pv : priority_cache_)
+    // Occlusion check via RayCaster — runs only on FOV-surviving voxels
     {
-      // Range check
-      Eigen::Vector3d diff = pv.pos - t_cand;
-      double range = diff.norm();
-      if (range > r_max || range < r_min) continue;
-
-      // FOV check: azimuth and elevation in sensor frame
-      Eigen::Vector3d los_k = diff / range;
-      tf::Vector3 los_k_sensor = sensor_rot_inv * tf::Vector3(los_k.x(), los_k.y(), los_k.z());
-      double az = std::atan2(los_k_sensor.y(), los_k_sensor.x());
-      double el = std::atan2(los_k_sensor.z(),
-                             std::sqrt(los_k_sensor.x()*los_k_sensor.x() +
-                                       los_k_sensor.y()*los_k_sensor.y()));
-      if (std::fabs(az) > hfov_rad * 0.5 || std::fabs(el) > vfov_rad * 0.5) continue;
-
-      // Boundary check
-      Eigen::Vector4d pv4(pv.pos.x(), pv.pos.y(), pv.pos.z(), 0);
-      if (!isInsideBoundaries(pv4)) continue;
-
-      // Occlusion check via RayCaster — runs only on FOV-surviving voxels
-      // (~7% of K for a 120°×20° sonar), so cost is ~36 × 70 × 40 steps per call.
-      {
-        std::shared_ptr<la3dm::BGKLOctoMap> ot_local = ot_;
-        la3dm::point3f t_p3f((float)t_cand.x(), (float)t_cand.y(), (float)t_cand.z());
-        la3dm::point3f pv_p3f((float)pv.pos.x(), (float)pv.pos.y(), (float)pv.pos.z());
-        la3dm::BGKLOctoMap::RayCaster rc(ot_local.get(), t_p3f, pv_p3f);
-        la3dm::point3f rp; la3dm::OcTreeNode rn;
-        la3dm::BlockHashKey rbk; la3dm::OcTreeHashKey rnk;
-        bool occluded = false;
-        while (!rc.end()) {
-          if (rc.next(rp, rn, rbk, rnk)) {
-            if (rn.get_state() == la3dm::State::OCCUPIED) {
-              float dx = rp.x()-pv_p3f.x(), dy = rp.y()-pv_p3f.y(), dz = rp.z()-pv_p3f.z();
-              if (std::sqrt(dx*dx + dy*dy + dz*dz) > (float)params_.resolution) {
-                occluded = true; break;
-              }
+      std::shared_ptr<la3dm::BGKLOctoMap> ot_local = ot_;
+      la3dm::point3f t_p3f((float)t_cand.x(), (float)t_cand.y(), (float)t_cand.z());
+      la3dm::point3f pv_p3f((float)pv.pos.x(), (float)pv.pos.y(), (float)pv.pos.z());
+      la3dm::BGKLOctoMap::RayCaster rc(ot_local.get(), t_p3f, pv_p3f);
+      la3dm::point3f rp; la3dm::OcTreeNode rn;
+      la3dm::BlockHashKey rbk; la3dm::OcTreeHashKey rnk;
+      bool occluded = false;
+      while (!rc.end()) {
+        if (rc.next(rp, rn, rbk, rnk)) {
+          if (rn.get_state() == la3dm::State::OCCUPIED) {
+            float dx = rp.x()-pv_p3f.x(), dy = rp.y()-pv_p3f.y(), dz = rp.z()-pv_p3f.z();
+            if (std::sqrt(dx*dx + dy*dy + dz*dz) > (float)params_.resolution) {
+              occluded = true; break;
             }
           }
         }
-        if (occluded) continue;
       }
-
-      // Predicted constraint direction n_pred = z_cand - dot(z_cand, los_k) * los_k  (PDF §6)
-      Eigen::Vector3d n_pred = z_cand - z_cand.dot(los_k) * los_k;
-      double n_norm = n_pred.norm();
-      if (n_norm < 1e-8) continue;
-      n_pred /= n_norm;
-
-      // Alignment with weak direction (squared dot product — n and -n equivalent)
-      double alignment = std::pow(n_pred.dot(pv.v_weak), 2);
-      score += pv.priority * alignment;
+      if (occluded) continue;
     }
 
-    gain_per_yaw[body_yaw] = score;
+    // Predicted constraint direction n_pred = z_cand - dot(z_cand, los_k) * los_k  (PDF §6)
+    Eigen::Vector3d n_pred = z_cand - z_cand.dot(los_k) * los_k;
+    double n_norm = n_pred.norm();
+    if (n_norm < 1e-8) continue;
+    n_pred /= n_norm;
+
+    // Alignment with weak direction (squared dot product — n and -n equivalent)
+    double alignment = std::pow(n_pred.dot(pv.v_weak), 2);
+    score += pv.priority * alignment;
   }
 
-  ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2] << "):");
-  for (const auto& kv : gain_per_yaw)
-      ROS_DEBUG_STREAM("  yaw " << std::setw(5) << kv.first << " deg  score: " << kv.second);
-
-  auto best_it = std::max_element(gain_per_yaw.begin(), gain_per_yaw.end(),
-    [](const std::pair<int,double>& a, const std::pair<int,double>& b) {
-        return a.second < b.second;
-    });
-
-  double yaw = best_it->first * M_PI / 180.0;
-  state[3] = yaw;
-  ROS_DEBUG_STREAM("  --> best_yaw: " << best_it->first << " deg  score: " << best_it->second);
+  ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2]
+                   << ") yaw=" << (state[3] * 180.0 / M_PI) << " deg  score: " << score);
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Releasing shared_lock and returning");
-  return std::make_pair(best_it->second, yaw);
+  return std::make_pair(score, state[3]);
 }
 
 geometry_msgs::PoseArray AEPlanner::getFrontiers()
@@ -764,7 +879,7 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   // m_pub_unk_->clear();
   m_pub_var_->clear();
 
-  const float max_var_vis = 0.5f;
+  const float max_var_vis = 0.25f;
   la3dm::point3f viz_center((float)current_state_[0], (float)current_state_[1], (float)current_state_[2]);
   auto leaf_begin = (params_.max_vis_radius > 0.0 and current_state_initialized_)
                         ? ot_->begin_leaf_in_sphere(viz_center, (float)params_.max_vis_radius)
@@ -796,6 +911,37 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] publishMapViz: Releasing shared_lock");
 }
 
+
+void AEPlanner::agentPoseCallback(const geometry_msgs::PoseStamped& msg)
+{
+  current_state_[0] = msg.pose.position.x;
+  current_state_[1] = msg.pose.position.y;
+  current_state_[2] = msg.pose.position.z;
+  current_state_[3] = tf2::getYaw(msg.pose.orientation);
+
+  current_state_initialized_ = true;
+
+  if (tpm_)
+    tpm_->setRobotPos(Eigen::Vector3d(current_state_[0],
+                                      current_state_[1],
+                                      current_state_[2]));
+}
+
+geometry_msgs::Pose AEPlanner::vecToPose(Eigen::Vector4d state)
+{
+  tf::Vector3 origin(state[0], state[1], state[2]);
+  double yaw = state[3];
+
+  tf::Quaternion quat;
+  quat.setEuler(0.0, 0.0, yaw);
+  tf::Pose pose_tf(quat, origin);
+
+  geometry_msgs::Pose pose;
+  tf::poseTFToMsg(pose_tf, pose);
+
+  return pose;
+}
+
 void AEPlanner::publishEvaluatedNodesRecursive(RRTNode* node)
 {
   if (!node)
@@ -816,31 +962,6 @@ void AEPlanner::publishEvaluatedNodesRecursive(RRTNode* node)
 
     publishEvaluatedNodesRecursive(*node_it);
   }
-}
-
-void AEPlanner::agentPoseCallback(const geometry_msgs::PoseStamped& msg)
-{
-  current_state_[0] = msg.pose.position.x;
-  current_state_[1] = msg.pose.position.y;
-  current_state_[2] = msg.pose.position.z;
-  current_state_[3] = tf2::getYaw(msg.pose.orientation);
-
-  current_state_initialized_ = true;
-}
-
-geometry_msgs::Pose AEPlanner::vecToPose(Eigen::Vector4d state)
-{
-  tf::Vector3 origin(state[0], state[1], state[2]);
-  double yaw = state[3];
-
-  tf::Quaternion quat;
-  quat.setEuler(0.0, 0.0, yaw);
-  tf::Pose pose_tf(quat, origin);
-
-  geometry_msgs::Pose pose;
-  tf::poseTFToMsg(pose_tf, pose);
-
-  return pose;
 }
 
 //-----------------------------------------------------------------------------

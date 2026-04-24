@@ -27,8 +27,8 @@ find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 
 add_message_files(
-  DIRECTORY msg 
-  FILES Node.msg
+  DIRECTORY msg
+  FILES Node.msg Target.msg TargetList.msg
 )
 add_action_files(
   DIRECTORY action 
@@ -60,24 +60,62 @@ include_directories(
   ${PCL_INCLUDE_DIRS}
 )
 
-add_library(aeplanner src/aeplanner_nodelet.cpp src/aeplanner.cpp src/aeplanner_viz.cpp src/param.cpp)
+set(AEPLANNER_SOURCES
+  src/aeplanner_nodelet.cpp
+  src/aeplanner.cpp
+  src/aeplanner_viz.cpp
+  src/param.cpp
+  src/voxel_classifier.cpp
+  src/frontier_detector.cpp
+  src/priority_scorer.cpp
+  src/blacklist.cpp
+  src/target_priority_map.cpp
+  src/hemisphere_sampler.cpp
+  src/frontier_sampler.cpp
+  src/pose_scorer.cpp
+  src/planner_state_machine.cpp
+  src/dwell_controller.cpp
+  src/global_target_selector.cpp
+  src/reachability_checker.cpp
+)
+
+add_library(aeplanner ${AEPLANNER_SOURCES})
 target_link_libraries(aeplanner
   ${catkin_LIBRARIES}
 )
 add_dependencies(aeplanner
-  ${catkin_EXPORTED_TARGETS} 
-  ${${PROJECT_NAME}_EXPORTED_TARGETS} 
+  ${catkin_EXPORTED_TARGETS}
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
   aeplanner_ref_generate_messages_cpp
   ${PROJECT_NAME}_gencfg
 )
 
-add_executable(aeplanner_node src/aeplanner_node.cpp src/aeplanner.cpp src/aeplanner_viz.cpp src/param.cpp)
+set(AEPLANNER_NODE_SOURCES
+  src/aeplanner_node.cpp
+  src/aeplanner.cpp
+  src/aeplanner_viz.cpp
+  src/param.cpp
+  src/voxel_classifier.cpp
+  src/frontier_detector.cpp
+  src/priority_scorer.cpp
+  src/blacklist.cpp
+  src/target_priority_map.cpp
+  src/hemisphere_sampler.cpp
+  src/frontier_sampler.cpp
+  src/pose_scorer.cpp
+  src/planner_state_machine.cpp
+  src/dwell_controller.cpp
+  src/global_target_selector.cpp
+  src/reachability_checker.cpp
+)
+
+add_executable(aeplanner_node ${AEPLANNER_NODE_SOURCES})
 target_link_libraries(aeplanner_node
   ${catkin_LIBRARIES}
 )
 add_dependencies(aeplanner_node
-  ${catkin_EXPORTED_TARGETS} 
-  ${${PROJECT_NAME}_EXPORTED_TARGETS} 
+  ${catkin_EXPORTED_TARGETS}
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
   aeplanner_ref_generate_messages_cpp
   ${PROJECT_NAME}_gencfg
 )

@@ -38,6 +38,16 @@
 #include <dynamic_reconfigure/server.h>
 #include <nav_msgs/Path.h>
 
+#include <aeplanner/target_priority_map.h>
+#include <aeplanner/directed_sampler.h>
+#include <aeplanner/hemisphere_sampler.h>
+#include <aeplanner/frontier_sampler.h>
+#include <aeplanner/planner_state_machine.h>
+#include <aeplanner/dwell_controller.h>
+#include <aeplanner/global_target_selector.h>
+#include <aeplanner/reachability_checker.h>
+#include <std_msgs/String.h>
+
 namespace aeplanner
 {
 class AEPlanner
@@ -71,6 +81,23 @@ private:
   // callback, so a growing map does not starve cloudCallback.
   ros::Timer viz_timer_;
 
+  // Target Priority Map — runs as a ros::Timer callback inside this process.
+  std::unique_ptr<TargetPriorityMap> tpm_;
+  ros::Timer                         tpm_timer_;
+  ros::Publisher                     state_pub_;  // /viewplanner/state
+
+  // Directed samplers (Phase 2)
+  std::unique_ptr<HemisphereSampler> hemisphere_sampler_;
+  std::unique_ptr<FrontierSampler>   frontier_sampler_;
+
+  // State machine and DWELL controller (Phase 3)
+  std::unique_ptr<PlannerStateMachine> state_machine_;
+  std::unique_ptr<DwellController>     dwell_controller_;
+
+  // Override target for REPOSITION state (Phase 4); empty optional = use TPM top
+  bool          has_reposition_target_ = false;
+  ScoredTarget  reposition_target_;
+
   // kd tree for finding nearest neighbours
   kdtree* kd_tree_;
 
@@ -88,7 +115,6 @@ private:
 
   // Services
   ros::ServiceClient best_node_client_;
-  ros::ServiceClient gp_query_client_;
   ros::ServiceServer reevaluate_server_;
 
   // Service server callback
@@ -125,9 +151,7 @@ private:
   void computePriorityCache();
 
   // ---------------- Helpers ----------------
-  //
   void publishEvaluatedNodesRecursive(RRTNode* node);
-
   geometry_msgs::Pose vecToPose(Eigen::Vector4d state);
 
   float CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2,

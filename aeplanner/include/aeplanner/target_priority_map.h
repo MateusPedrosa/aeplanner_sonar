@@ -1,0 +1,88 @@
+#ifndef AEPLANNER_TARGET_PRIORITY_MAP_H
+#define AEPLANNER_TARGET_PRIORITY_MAP_H
+
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <vector>
+
+#include <ros/ros.h>
+#include <eigen3/Eigen/Dense>
+
+#include <bgkloctomap/bgkloctomap.h>
+
+#include <aeplanner/voxel_classifier.h>
+#include <aeplanner/frontier_detector.h>
+#include <aeplanner/priority_scorer.h>
+#include <aeplanner/blacklist.h>
+#include <aeplanner/TargetList.h>
+
+namespace aeplanner
+{
+
+struct TPMParams
+{
+  float  sigma2_thresh;    // min Var_beta for U-target (default 0.05)
+  float  w_frontier;       // frontier bonus weight (default 0.6)
+  float  cluster_norm;     // density normalisation (default 100.0)
+  float  R_cluster;        // frontier clustering radius (default 2.0 m)
+  float  r_max;            // map query radius (default 20.0 m)
+  int    n_fail;           // failures before blacklisting (default 3)
+  double t_cooldown;       // blacklist cooldown seconds (default 30.0)
+  int    nbv_k;            // max targets to publish (default 1000)
+  double resolution;       // voxel resolution for blacklist key (default 0.2 m)
+  std::string world_frame; // TF frame for published messages (default "world")
+};
+
+// In-process Target Priority Map. Runs as a ros::Timer callback that shares
+// the BGKLOctoMap pointer (read-only) with the planner. Thread-safe: the map
+// shared_mutex is held as a shared_lock during iteration.
+class TargetPriorityMap
+{
+public:
+  TargetPriorityMap(ros::NodeHandle& nh,
+                    const std::shared_ptr<la3dm::BGKLOctoMap>& map,
+                    std::shared_mutex& map_mutex,
+                    const TPMParams& params);
+
+  // Timer callback — classifies, clusters, scores, publishes /tpm/targets.
+  void update(const ros::TimerEvent&);
+
+  // Called by the planner when it deems a target resolved (priority dropped).
+  void recordSuccess(const Eigen::Vector3d& pos);
+
+  // Called by the planner when a target was visited but not resolved.
+  void recordFailure(const Eigen::Vector3d& pos);
+
+  // Thread-safe snapshot of the current target list (for use by the sampler).
+  std::vector<ScoredTarget> getTargets() const;
+
+  // Update the robot position used for map radius query.
+  void setRobotPos(const Eigen::Vector3d& pos);
+
+private:
+  ros::Publisher                          targets_pub_;
+  ros::Publisher                          viz_pub_;
+  ros::Publisher                          clusters_pub_;
+
+  std::shared_ptr<la3dm::BGKLOctoMap>     map_;
+  std::shared_mutex&                      map_mutex_;
+
+  TPMParams params_;
+  Blacklist blacklist_;
+
+  Eigen::Vector3d robot_pos_;
+  mutable std::mutex robot_pos_mutex_;
+
+  std::vector<ScoredTarget> targets_;
+  mutable std::mutex targets_mutex_;
+
+  aeplanner::TargetList toROSMsg(const std::vector<ScoredTarget>& targets) const;
+  void publishViz(const std::vector<ScoredTarget>& targets) const;
+  void publishClustersViz(const std::vector<FrontierCluster>& clusters,
+                          const std::vector<ClassifiedVoxel>& frontier_voxels) const;
+};
+
+}  // namespace aeplanner
+
+#endif  // AEPLANNER_TARGET_PRIORITY_MAP_H

@@ -1,0 +1,32 @@
+viewplanner:
+  # Target classification
+  sigma2_thresh:       0.05    # Min Var_beta to qualify as U-target
+  var_resolved_thresh: 0.01    # Var_beta below which DWELL exits (replaces lambda_target)
+
+  # Priority formula
+  w_frontier:          0.05     # Frontier bonus weight in priority score
+  cluster_norm:        100.0   # Normalisation for cluster density term
+
+  # Frontier detection
+  R_cluster:           2.0     # Frontier clustering radius (m)
+  w_normal_thresh:     0.4     # Min PCA anisotropy for reliable frontier normal
+
+  # State machine
+  alpha_bias:          1.0     # U vs E priority bias (1.0 = no bias)
+  local_radius:        10.0    # Radius of "local volume" for EXPLORE vs REPOSITION (m)
+
+  # Pose scoring and sampling
+  lambda_dist:         0.2     # Exponential distance penalty: score *= exp(-lambda_dist * dist)
+  d_standoff:          4.0     # Nominal sonar standoff for viewpoint placement (m)
+  R_sample:            8.0     # Hemisphere sampling radius around target (m)
+  N_samples:           50      # Hemisphere pose samples per target
+
+  # DWELL state
+  T_dwell:             15.0    # Max hold time before DWELL timeout (s)
+
+  # Blacklisting
+  N_fail:              3       # Consecutive failures before blacklisting a target
+  T_cooldown:          30.0    # Blacklist cooldown duration (s)
+
+  # TPM
+  tpm_rate:            2.0     # TPM update frequency (Hz)

@@ -10,13 +10,13 @@ system/bbx/overshoot: 0.25
 
 aep/gain/r_min: 0.1
 aep/gain/r_max: 20
-aep/gain/zero: 100
+aep/gain/zero: 0.05
 aep/gain/lambda: 0.1
 aep/gain/sigma_thresh: 0.2
 aep/tree/extension_range: 0.75
 aep/tree/max_sampling_radius: 10
-aep/tree/initial_iterations: 15
-aep/tree/cutoff_iterations: 30
+aep/tree/initial_iterations: 150
+aep/tree/cutoff_iterations: 300
 
 rrt/min_nodes: 100
 
@@ -45,8 +45,8 @@ occupied_thresh: 0.7
 prior_A: 0.001
 prior_B: 0.001
 var_thresh: 100.0
-min_z: -3.0
-max_z: 3.0
+min_z: -50.0
+max_z: 50.0
 free_ray_range_weight: false
 tau_var: 0.01
 tau_info: 0.5

@@ -66,6 +66,24 @@ namespace aeplanner
     double max_z;
 
     int nbv_k;  // top-K voxels used in info-matrix gain scoring (NBV planner)
+
+    // --- Directed View Planner Parameters ---
+    float  sigma2_thresh;       // min Var_beta for U-target (default 0.05)
+    float  w_frontier;          // frontier bonus weight in priority (default 0.6)
+    float  cluster_norm;        // density normalisation for frontier priority (default 100.0)
+    float  R_cluster;           // frontier clustering radius in metres (default 2.0)
+    float  var_resolved_thresh; // Var_beta below which DWELL exits (default 0.01)
+    float  alpha_bias;          // U vs E priority bias in state machine (default 1.0)
+    double lambda_dist;         // exponential distance penalty in pose scorer (default 0.2)
+    double d_standoff;          // nominal sonar standoff distance in metres (default 4.0)
+    double R_sample;            // hemisphere sampling radius (default 8.0)
+    int    N_samples;           // hemisphere samples per target (default 50)
+    double T_dwell;             // DWELL timeout seconds (default 15.0)
+    int    N_fail;              // consecutive failures before blacklisting (default 3)
+    double T_cooldown;          // blacklist cooldown seconds (default 30.0)
+    double local_radius;        // radius defining "local volume" (default 10.0)
+    float  w_normal_thresh;     // min PCA anisotropy for reliable frontier normal (default 0.4)
+    double tpm_rate;            // TPM update rate in Hz (default 2.0)
   };
 
   Params readParams();

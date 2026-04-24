@@ -95,7 +95,7 @@ namespace aeplanner
     if (!ros::param::get(ns + "/system/bbx/overshoot", params.d_overshoot_)) {
       ROS_WARN_STREAM("No /system/bbx/overshoot specified. Default: " << params.d_overshoot_);
     }
-    params.world_frame = "world";
+    params.world_frame = "map";
     if (!ros::param::get(ns + "/world_frame", params.world_frame)) {
       ROS_WARN_STREAM("No /world_frame specified. Default: " << params.world_frame);
     }
@@ -200,6 +200,72 @@ namespace aeplanner
     params.nbv_k = 1000;
     if (!ros::param::get(ns + "/aep/gain/nbv_k", params.nbv_k)) {
       ROS_WARN_STREAM("No nbv_k specified. Default: " << params.nbv_k);
+    }
+
+    // --- Directed View Planner Parameters ---
+    params.sigma2_thresh = 0.05f;
+    if (!ros::param::get(ns + "/viewplanner/sigma2_thresh", params.sigma2_thresh)) {
+      ROS_WARN_STREAM("No viewplanner/sigma2_thresh specified. Default: " << params.sigma2_thresh);
+    }
+    params.w_frontier = 0.6f;
+    if (!ros::param::get(ns + "/viewplanner/w_frontier", params.w_frontier)) {
+      ROS_WARN_STREAM("No viewplanner/w_frontier specified. Default: " << params.w_frontier);
+    }
+    params.cluster_norm = 100.0f;
+    if (!ros::param::get(ns + "/viewplanner/cluster_norm", params.cluster_norm)) {
+      ROS_WARN_STREAM("No viewplanner/cluster_norm specified. Default: " << params.cluster_norm);
+    }
+    params.R_cluster = 2.0f;
+    if (!ros::param::get(ns + "/viewplanner/R_cluster", params.R_cluster)) {
+      ROS_WARN_STREAM("No viewplanner/R_cluster specified. Default: " << params.R_cluster);
+    }
+    params.var_resolved_thresh = 0.01f;
+    if (!ros::param::get(ns + "/viewplanner/var_resolved_thresh", params.var_resolved_thresh)) {
+      ROS_WARN_STREAM("No viewplanner/var_resolved_thresh specified. Default: " << params.var_resolved_thresh);
+    }
+    params.alpha_bias = 1.0f;
+    if (!ros::param::get(ns + "/viewplanner/alpha_bias", params.alpha_bias)) {
+      ROS_WARN_STREAM("No viewplanner/alpha_bias specified. Default: " << params.alpha_bias);
+    }
+    params.lambda_dist = 0.2;
+    if (!ros::param::get(ns + "/viewplanner/lambda_dist", params.lambda_dist)) {
+      ROS_WARN_STREAM("No viewplanner/lambda_dist specified. Default: " << params.lambda_dist);
+    }
+    params.d_standoff = 4.0;
+    if (!ros::param::get(ns + "/viewplanner/d_standoff", params.d_standoff)) {
+      ROS_WARN_STREAM("No viewplanner/d_standoff specified. Default: " << params.d_standoff);
+    }
+    params.R_sample = 8.0;
+    if (!ros::param::get(ns + "/viewplanner/R_sample", params.R_sample)) {
+      ROS_WARN_STREAM("No viewplanner/R_sample specified. Default: " << params.R_sample);
+    }
+    params.N_samples = 50;
+    if (!ros::param::get(ns + "/viewplanner/N_samples", params.N_samples)) {
+      ROS_WARN_STREAM("No viewplanner/N_samples specified. Default: " << params.N_samples);
+    }
+    params.T_dwell = 15.0;
+    if (!ros::param::get(ns + "/viewplanner/T_dwell", params.T_dwell)) {
+      ROS_WARN_STREAM("No viewplanner/T_dwell specified. Default: " << params.T_dwell);
+    }
+    params.N_fail = 3;
+    if (!ros::param::get(ns + "/viewplanner/N_fail", params.N_fail)) {
+      ROS_WARN_STREAM("No viewplanner/N_fail specified. Default: " << params.N_fail);
+    }
+    params.T_cooldown = 30.0;
+    if (!ros::param::get(ns + "/viewplanner/T_cooldown", params.T_cooldown)) {
+      ROS_WARN_STREAM("No viewplanner/T_cooldown specified. Default: " << params.T_cooldown);
+    }
+    params.local_radius = 10.0;
+    if (!ros::param::get(ns + "/viewplanner/local_radius", params.local_radius)) {
+      ROS_WARN_STREAM("No viewplanner/local_radius specified. Default: " << params.local_radius);
+    }
+    params.w_normal_thresh = 0.4f;
+    if (!ros::param::get(ns + "/viewplanner/w_normal_thresh", params.w_normal_thresh)) {
+      ROS_WARN_STREAM("No viewplanner/w_normal_thresh specified. Default: " << params.w_normal_thresh);
+    }
+    params.tpm_rate = 2.0;
+    if (!ros::param::get(ns + "/viewplanner/tpm_rate", params.tpm_rate)) {
+      ROS_WARN_STREAM("No viewplanner/tpm_rate specified. Default: " << params.tpm_rate);
     }
 
     return params;
