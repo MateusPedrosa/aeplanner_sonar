@@ -8,6 +8,8 @@ int main(int argc, char** argv)
   
   aeplanner::AEPlanner aeplanner(nh);
 
-  ros::spin();
+  ros::AsyncSpinner spinner(0);
+  spinner.start();
+  ros::waitForShutdown();
   return 0;
 }
