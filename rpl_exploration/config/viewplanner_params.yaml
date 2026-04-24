@@ -22,7 +22,7 @@ viewplanner:
   N_samples:           50      # Hemisphere pose samples per target
 
   # DWELL state
-  T_dwell:             15.0    # Max hold time before DWELL timeout (s)
+  T_dwell:             3.0    # Max hold time before DWELL timeout (s)
 
   # Blacklisting
   N_fail:              3       # Consecutive failures before blacklisting a target

@@ -121,8 +121,13 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       }
       state_machine_->exitDwell();
     }
-    // Return non-moving result while dwelling
-    result.is_clear = false;
+    // Return the current pose as goal so rpl_exploration keeps the robot
+    // stationary and immediately replans (avoiding the "no frontiers →
+    // exploration complete" branch).
+    result.is_clear = true;
+    result.pose.pose = vecToPose(current_state_);
+    result.pose.header.stamp    = ros::Time::now();
+    result.pose.header.frame_id = params_.world_frame;
     as_.setSucceeded(result);
     return;
   }
@@ -201,11 +206,13 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
   if (planner_state == PlannerState::RESOLVE && !tpm_targets.empty())
   {
     const ScoredTarget& top = tpm_targets[0];
-    // Check if robot is already at standoff distance from the target
+    // Enter DWELL as soon as the target is within sensor range — no need to
+    // arrive at an exact standoff position.
     double dist_to_target = (current_state_.head<3>() - top.pos).norm();
-    if (dist_to_target < params_.d_standoff * 1.5)
+    if (dist_to_target < params_.r_max)
     {
-      ROS_INFO_STREAM("[RESOLVE] Arrived at standoff. Entering DWELL for target at ("
+      ROS_INFO_STREAM("[RESOLVE] Target within sensor range (" << dist_to_target
+                      << " m). Entering DWELL for target at ("
                       << top.pos.x() << ", " << top.pos.y() << ", " << top.pos.z() << ")");
       state_machine_->enterDwell(top);
       dwell_controller_->startDwell(top, current_state_, params_);
