@@ -443,11 +443,13 @@ void AEPlanner::expandRRT()
     kd_insert3(kd_tree_, new_node->state_[0], new_node->state_[1], new_node->state_[2],
                new_node);
 
-    // Update best node
-
+    // Update best node — only non-UNKNOWN nodes qualify as NBV viewpoints.
+    // UNKNOWN nodes remain in the tree for path connectivity but are never
+    // selected as the goal pose sent to the robot.
     ROS_DEBUG_STREAM("Update best node");
-    if (!best_node_ or
-        new_node->score(params_.lambda) > best_node_->score(params_.lambda))
+    if (ot_result.get_state() != la3dm::State::UNKNOWN &&
+        (!best_node_ or
+         new_node->score(params_.lambda) > best_node_->score(params_.lambda)))
       best_node_ = new_node;
 
     ROS_DEBUG_STREAM("iteration Done!");
