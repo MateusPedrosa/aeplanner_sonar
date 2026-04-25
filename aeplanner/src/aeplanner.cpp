@@ -27,7 +27,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   la3dm::OcTreeNode::tau_info = params_.tau_info;
 
   m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/occupied_cells_vis_array", params_.resolution);
-  m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/free_cells_vis_array", params_.resolution);
+  // m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/free_cells_vis_array", params_.resolution);
   // m_pub_free_txt_ = new la3dm::TextMarkerArrayPub(nh_, "/bgkloctomap/free_cells_txt_vis_array", params_.resolution);
   m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/uncertain_cells_vis_array", params_.resolution);
   // m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/unknown_cells_vis_array", params_.resolution);
@@ -166,6 +166,271 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     }
   }
 
+  // ── RESOLVE: committed navigation to best viewpoint ──────────────────────
+  // Select the best candidate once, then step toward it with forward-facing
+  // yaw. DWELL is entered only when the robot arrives (dist < dwell_arrival_thresh)
+  if (planner_state == PlannerState::RESOLVE)
+  {
+    // Invalidate any stale commitment if we just re-entered RESOLVE.
+    if (prev_planner_state_ != PlannerState::RESOLVE &&
+        prev_planner_state_ != PlannerState::DWELL)
+    {
+      has_committed_viewpoint_ = false;
+      resolve_waypoints_.clear();
+      resolve_wp_idx_ = 0;
+    }
+
+    prev_planner_state_ = PlannerState::RESOLVE;
+
+    // ── Select viewpoint once per RESOLVE episode ─────────────────────────
+    if (!has_committed_viewpoint_)
+    {
+      if (tpm_targets.empty())
+      {
+        result.is_clear = false;
+        as_.setSucceeded(result);
+        return;
+      }
+
+      const ScoredTarget& top = tpm_targets[0];
+
+      DirectedSampler* sampler =
+          (top.type == TargetType::E_FREE &&
+           top.w_normal < params_.w_normal_thresh)
+          ? static_cast<DirectedSampler*>(frontier_sampler_.get())
+          : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
+
+      auto candidates = sampler->sampleCandidates(top, current_state_, ot_, params_);
+
+      priority_cache_valid_ = false;
+      computePriorityCache();
+
+      double best_score = -1.0;
+      std::vector<std::pair<Eigen::Vector4d, double>> scored_candidates;
+      for (const CandidatePose& cp : candidates)
+      {
+        if (!isInsideBoundaries(cp.state)) continue;
+        auto [gain, yaw] = gainCubature(cp.state);
+        double dist = (cp.state.head<3>() - current_state_.head<3>()).norm();
+        double score = gain * std::exp(-params_.lambda_dist * dist);
+        scored_candidates.push_back({cp.state, score});
+        if (score > best_score)
+        {
+          best_score           = score;
+          committed_viewpoint_ = cp.state;
+        }
+      }
+
+      if (best_score <= 0.0)
+      {
+        ROS_WARN("[RESOLVE] No valid candidate viewpoint found; deferring.");
+        result.is_clear    = false;
+        result.frontiers   = getFrontiers();
+        as_.setSucceeded(result);
+        return;
+      }
+
+      committed_target_        = top;
+      has_committed_viewpoint_ = true;
+      resolve_waypoints_.clear();
+      resolve_wp_idx_ = 0;
+      ROS_INFO_STREAM("[RESOLVE] Committed viewpoint ("
+        << committed_viewpoint_[0] << ", " << committed_viewpoint_[1]
+        << ", " << committed_viewpoint_[2]
+        << ") yaw=" << (committed_viewpoint_[3] * 180.0 / M_PI) << " deg"
+        << "  score=" << best_score);
+
+      // ── Publish candidates + committed viewpoint (clears old RRT tree) ──
+      {
+        visualization_msgs::MarkerArray viz;
+
+        // Clear previous RRT markers
+        visualization_msgs::Marker del;
+        del.action = visualization_msgs::Marker::DELETEALL;
+        viz.markers.push_back(del);
+
+        // Candidate viewpoints — yellow arrows scaled by score
+        int cand_id = 0;
+        for (const auto& [state, score] : scored_candidates)
+        {
+          visualization_msgs::Marker m;
+          m.header.stamp    = ros::Time::now();
+          m.header.frame_id = params_.world_frame;
+          m.ns = "resolve_candidates";
+          m.id = cand_id++;
+          m.type   = visualization_msgs::Marker::ARROW;
+          m.action = visualization_msgs::Marker::ADD;
+          m.pose.position.x = state[0];
+          m.pose.position.y = state[1];
+          m.pose.position.z = state[2];
+          tf::Quaternion cq; cq.setEuler(0.0, 0.0, state[3]);
+          m.pose.orientation.x = cq.x(); m.pose.orientation.y = cq.y();
+          m.pose.orientation.z = cq.z(); m.pose.orientation.w = cq.w();
+          double rel = (best_score > 0) ? score / best_score : 0.0;
+          m.scale.x = std::max(rel * 1.5, 0.1);
+          m.scale.y = 0.12; m.scale.z = 0.12;
+          m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 0.8;
+          m.lifetime = ros::Duration(30.0);
+          viz.markers.push_back(m);
+        }
+
+        // Committed viewpoint — large green arrow
+        {
+          visualization_msgs::Marker m;
+          m.header.stamp    = ros::Time::now();
+          m.header.frame_id = params_.world_frame;
+          m.ns = "resolve_committed"; m.id = 0;
+          m.type   = visualization_msgs::Marker::ARROW;
+          m.action = visualization_msgs::Marker::ADD;
+          m.pose.position.x = committed_viewpoint_[0];
+          m.pose.position.y = committed_viewpoint_[1];
+          m.pose.position.z = committed_viewpoint_[2];
+          tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_viewpoint_[3]);
+          m.pose.orientation.x = vq.x(); m.pose.orientation.y = vq.y();
+          m.pose.orientation.z = vq.z(); m.pose.orientation.w = vq.w();
+          m.scale.x = 2.0; m.scale.y = 0.3; m.scale.z = 0.3;
+          m.color.r = 0.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 1.0;
+          m.lifetime = ros::Duration(0);  // persistent until overwritten
+          viz.markers.push_back(m);
+        }
+
+        rrt_marker_pub_.publish(viz);
+      }
+    }
+
+    // ── Ensure we have a planned path ─────────────────────────────────────
+    if (resolve_waypoints_.empty())
+    {
+      resolve_waypoints_ = planPathToGoal(committed_viewpoint_);
+      resolve_wp_idx_    = 0;
+
+      if (resolve_waypoints_.empty())
+      {
+        ROS_WARN("[RESOLVE] planPathToGoal failed; re-selecting viewpoint next iteration.");
+        has_committed_viewpoint_ = false;
+        // Hold current position — do NOT fall back to getFrontiers() from inside
+        // RESOLVE, as pigain has no nodes and would return 0 frontiers, causing
+        // rpl_exploration to declare exploration complete prematurely.
+        result.is_clear             = true;
+        result.pose.pose            = vecToPose(current_state_);
+        result.pose.header.stamp    = ros::Time::now();
+        result.pose.header.frame_id = params_.world_frame;
+        as_.setSucceeded(result);
+        return;
+      }
+
+      // Publish the full planned path as a LINE_STRIP
+      {
+        visualization_msgs::MarkerArray viz;
+        visualization_msgs::Marker path_marker;
+        path_marker.header.stamp    = ros::Time::now();
+        path_marker.header.frame_id = params_.world_frame;
+        path_marker.ns = "resolve_path"; path_marker.id = 0;
+        path_marker.type   = visualization_msgs::Marker::LINE_STRIP;
+        path_marker.action = visualization_msgs::Marker::ADD;
+        geometry_msgs::Point p0;
+        p0.x = current_state_[0]; p0.y = current_state_[1]; p0.z = current_state_[2];
+        path_marker.points.push_back(p0);
+        for (const auto& wp : resolve_waypoints_)
+        {
+          geometry_msgs::Point p;
+          p.x = wp[0]; p.y = wp[1]; p.z = wp[2];
+          path_marker.points.push_back(p);
+        }
+        path_marker.scale.x = 0.1;
+        path_marker.color.r = 0.0; path_marker.color.g = 0.9;
+        path_marker.color.b = 0.2; path_marker.color.a = 0.9;
+        path_marker.lifetime = ros::Duration(0);
+        viz.markers.push_back(path_marker);
+        rrt_marker_pub_.publish(viz);
+      }
+    }
+
+    // ── Follow waypoints ───────────────────────────────────────────────────
+    double dist_to_wp =
+        (current_state_.head<3>() - resolve_waypoints_[resolve_wp_idx_].head<3>()).norm();
+
+    if (dist_to_wp < params_.dwell_arrival_thresh)
+    {
+      ++resolve_wp_idx_;
+      if (resolve_wp_idx_ >= (int)resolve_waypoints_.size())
+      {
+        ROS_INFO("[RESOLVE] Arrived at viewpoint. Entering DWELL.");
+        state_machine_->enterDwell(committed_target_);
+        dwell_controller_->startDwell(committed_target_, current_state_, params_);
+        has_committed_viewpoint_ = false;
+        resolve_waypoints_.clear();
+        resolve_wp_idx_ = 0;
+
+        result.is_clear             = true;
+        result.pose.pose            = vecToPose(current_state_);
+        result.pose.header.stamp    = ros::Time::now();
+        result.pose.header.frame_id = params_.world_frame;
+        as_.setSucceeded(result);
+        return;
+      }
+    }
+
+    // Step toward the current waypoint
+    const Eigen::Vector4d& wp = resolve_waypoints_[resolve_wp_idx_];
+    Eigen::Vector3d diff   = wp.head<3>() - current_state_.head<3>();
+    double remaining       = diff.norm();
+    Eigen::Vector3d dir    = diff / remaining;
+    double step            = std::min(params_.extension_range, remaining);
+
+    Eigen::Vector4d next_pose;
+    next_pose.head<3>() = current_state_.head<3>() + step * dir;
+    next_pose[3]        = wp[3];  // forward yaw for intermediates, sensing yaw for final
+
+    if (collisionLine(current_state_, next_pose, params_.bounding_radius))
+    {
+      ROS_WARN("[RESOLVE] Path blocked; re-planning next iteration.");
+      resolve_waypoints_.clear();
+      resolve_wp_idx_ = 0;
+      // Hold current position — getFrontiers() returns 0 nodes during RESOLVE
+      // (pigain only populated from EXPLORE/REPOSITION), which would cause
+      // rpl_exploration to declare exploration complete prematurely.
+      result.is_clear             = true;
+      result.pose.pose            = vecToPose(current_state_);
+      result.pose.header.stamp    = ros::Time::now();
+      result.pose.header.frame_id = params_.world_frame;
+      as_.setSucceeded(result);
+      return;
+    }
+
+    // ── Refresh committed viewpoint marker on every step ──────────────────
+    {
+      visualization_msgs::MarkerArray viz;
+      visualization_msgs::Marker vp;
+      vp.header.stamp    = ros::Time::now();
+      vp.header.frame_id = params_.world_frame;
+      vp.ns = "resolve_committed"; vp.id = 0;
+      vp.type   = visualization_msgs::Marker::ARROW;
+      vp.action = visualization_msgs::Marker::ADD;
+      vp.pose.position.x = committed_viewpoint_[0];
+      vp.pose.position.y = committed_viewpoint_[1];
+      vp.pose.position.z = committed_viewpoint_[2];
+      tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_viewpoint_[3]);
+      vp.pose.orientation.x = vq.x(); vp.pose.orientation.y = vq.y();
+      vp.pose.orientation.z = vq.z(); vp.pose.orientation.w = vq.w();
+      vp.scale.x = 2.0; vp.scale.y = 0.3; vp.scale.z = 0.3;
+      vp.color.r = 0.0; vp.color.g = 1.0; vp.color.b = 0.0; vp.color.a = 1.0;
+      vp.lifetime = ros::Duration(0);
+      viz.markers.push_back(vp);
+      rrt_marker_pub_.publish(viz);
+    }
+
+    result.is_clear             = true;
+    result.pose.pose            = vecToPose(next_pose);
+    result.pose.header.stamp    = ros::Time::now();
+    result.pose.header.frame_id = params_.world_frame;
+    as_.setSucceeded(result);
+    return;
+  }
+
+  prev_planner_state_ = planner_state;
+  // ─────────────────────────────────────────────────────────────────────────
+
   ROS_DEBUG("Init");
   RRTNode* root = initialize();
   ROS_DEBUG("expandRRT");
@@ -202,23 +467,6 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
   ROS_DEBUG("publishRecursive");
   publishEvaluatedNodesRecursive(root);
 
-  // If we just arrived at a RESOLVE viewpoint, transition to DWELL
-  if (planner_state == PlannerState::RESOLVE && !tpm_targets.empty())
-  {
-    const ScoredTarget& top = tpm_targets[0];
-    // Enter DWELL as soon as the target is within sensor range — no need to
-    // arrive at an exact standoff position.
-    double dist_to_target = (current_state_.head<3>() - top.pos).norm();
-    if (dist_to_target < params_.r_max)
-    {
-      ROS_INFO_STREAM("[RESOLVE] Target within sensor range (" << dist_to_target
-                      << " m). Entering DWELL for target at ("
-                      << top.pos.x() << ", " << top.pos.y() << ", " << top.pos.z() << ")");
-      state_machine_->enterDwell(top);
-      dwell_controller_->startDwell(top, current_state_, params_);
-    }
-  }
-
   ROS_DEBUG("extractPose");
   result.pose.pose = vecToPose(best_branch_root_->children_[0]->state_);
   ROS_INFO_STREAM("Best node score: " << best_node_->score(params_.lambda));
@@ -231,6 +479,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     delete best_branch_root_;
     best_branch_root_ = NULL;
   }
+  prev_planner_state_ = planner_state;
   as_.setSucceeded(result);
 
   ROS_DEBUG("Deleting/Freeing!");
@@ -364,7 +613,7 @@ void AEPlanner::expandRRT()
 
     auto try_candidate = [&](Eigen::Vector4d candidate) -> bool {
       new_node->state_ = candidate;
-      nearest = chooseParent(new_node, params_.extension_range);
+      nearest = chooseParent(new_node, params_.extension_range, kd_tree_);
       new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
       {
         std::shared_lock<std::shared_mutex> lock(ot_mutex_);
@@ -481,17 +730,13 @@ Eigen::Vector4d AEPlanner::sampleNewPoint()
   return point;
 }
 
-RRTNode* AEPlanner::chooseParent(RRTNode* node, double l)
+RRTNode* AEPlanner::chooseParent(RRTNode* node, double l, kdtree* tree)
 {
-  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
-  Eigen::Vector4d current_state = current_state_;
-
-  // Find nearest neighbour
-  kdres* nearest = kd_nearest_range3(kd_tree_, node->state_[0], node->state_[1],
+  kdres* nearest = kd_nearest_range3(tree, node->state_[0], node->state_[1],
                                      node->state_[2], l + 0.5); // FIXME why +0.5?
 
   if (kd_res_size(nearest) <= 0)
-    nearest = kd_nearest3(kd_tree_, node->state_[0], node->state_[1], node->state_[2]);
+    nearest = kd_nearest3(tree, node->state_[0], node->state_[1], node->state_[2]);
   if (kd_res_size(nearest) <= 0)
   {
     kd_res_free(nearest);
@@ -517,6 +762,88 @@ RRTNode* AEPlanner::chooseParent(RRTNode* node, double l)
 
   kd_res_free(nearest);
   return best_node;
+}
+
+std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& goal)
+{
+  kdtree* path_kd = kd_create(3);
+
+  RRTNode* root = new RRTNode();
+  root->state_ = current_state_;
+  kd_insert3(path_kd, root->state_[0], root->state_[1], root->state_[2], root);
+
+  RRTNode* best_goal_node = nullptr;
+  double   best_goal_dist = std::numeric_limits<double>::max();
+
+  for (int i = 0; i < params_.cutoff_iterations && ros::ok(); ++i)
+  {
+    // Goal-biased sampling: 30 % chance to sample the goal directly
+    Eigen::Vector4d sample = ((double)rand() / RAND_MAX < 0.3)
+        ? goal
+        : current_state_ + sampleNewPoint();
+
+    RRTNode* new_node = new RRTNode();
+    new_node->state_  = sample;
+
+    // RRT*: pick best-cost parent among near neighbours
+    RRTNode* nearest = chooseParent(new_node, params_.extension_range, path_kd);
+    if (!nearest) { delete new_node; continue; }
+
+    new_node->state_ = restrictDistance(nearest->state_, sample);
+
+    // Validity checks
+    {
+      std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+      if (ot_->search(new_node->state_[0], new_node->state_[1], new_node->state_[2])
+              .get_state() == la3dm::State::UNKNOWN)
+        { delete new_node; continue; }
+    }
+    if (!isInsideBoundaries(new_node->state_))
+        { delete new_node; continue; }
+    if (collisionLine(nearest->state_, new_node->state_, params_.bounding_radius))
+        { delete new_node; continue; }
+
+    new_node->parent_ = nearest;
+    nearest->children_.push_back(new_node);
+    kd_insert3(path_kd, new_node->state_[0], new_node->state_[1], new_node->state_[2], new_node);
+
+    // RRT*: rewire near neighbours through new_node if cheaper
+    rewire(path_kd, new_node, params_.extension_range, params_.bounding_radius, params_.d_overshoot_);
+
+    double d = (new_node->state_.head<3>() - goal.head<3>()).norm();
+    if (d < best_goal_dist) { best_goal_dist = d; best_goal_node = new_node; }
+    if (d < params_.dwell_arrival_thresh) break;
+  }
+
+  // Extract waypoints by tracing parent pointers back to root, then reversing.
+  // Root itself is excluded (robot is already there).
+  std::vector<Eigen::Vector4d> path;
+  if (best_goal_node)
+  {
+    for (RRTNode* cur = best_goal_node; cur->parent_; cur = cur->parent_)
+      path.push_back(cur->state_);
+    std::reverse(path.begin(), path.end());
+
+    // Snap last waypoint to exact goal so the sensing yaw is preserved exactly
+    if (!path.empty()) path.back() = goal;
+    else               path.push_back(goal);
+
+    // Forward-facing yaw for every intermediate waypoint
+    for (int i = 0; i + 1 < (int)path.size(); ++i)
+    {
+      Eigen::Vector3d d = path[i+1].head<3>() - path[i].head<3>();
+      if (d.norm() > 1e-6) path[i][3] = std::atan2(d[1], d[0]);
+    }
+  }
+
+  // rewire() updates parent_ pointers but leaves children_ intact, so the
+  // full tree is still reachable from root via children_ — delete root cleans all nodes.
+  kd_free(path_kd);
+  delete root;
+
+  ROS_INFO_STREAM("[RESOLVE] planPathToGoal: " << path.size()
+    << " waypoints, best_goal_dist=" << best_goal_dist << " m");
+  return path;
 }
 
 void AEPlanner::rewire(kdtree* kd_tree, RRTNode* new_node, double l, double r,
@@ -882,7 +1209,7 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] publishMapViz: Acquired shared_lock");
 
   m_pub_occ_->clear();
-  m_pub_free_->clear();
+  // m_pub_free_->clear();
   // m_pub_free_txt_->clear();
   m_pub_unc_->clear();
   // m_pub_unk_->clear();
@@ -902,9 +1229,10 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
       m_pub_occ_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
     } else if (state == la3dm::State::UNCERTAIN) {
       m_pub_unc_->insert_point3d_color(p.x(), p.y(), p.z(), it.get_size(), 1.0f, 1.0f, 0.0f);
-    } else if (state == la3dm::State::FREE) {
-      m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
     }
+    // else if (state == la3dm::State::FREE) {
+    //   m_pub_free_->insert_point3d(p.x(), p.y(), p.z(), params_.min_z, params_.max_z, it.get_size());
+    // }
 
     if (state == la3dm::State::OCCUPIED || state == la3dm::State::UNCERTAIN) {
       std::string ns = (state == la3dm::State::OCCUPIED) ? "occupied" : "uncertain";
@@ -913,7 +1241,7 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   }
 
   m_pub_occ_->publish();
-  m_pub_free_->publish();
+  // m_pub_free_->publish();
   m_pub_unc_->publish();
   // m_pub_unk_->publish();
   m_pub_var_->publish();

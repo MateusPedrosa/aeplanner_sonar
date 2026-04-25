@@ -84,6 +84,7 @@ namespace aeplanner
     double local_radius;        // radius defining "local volume" (default 10.0)
     float  w_normal_thresh;     // min PCA anisotropy for reliable frontier normal (default 0.4)
     double tpm_rate;            // TPM update rate in Hz (default 2.0)
+    double dwell_arrival_thresh; // dist to committed viewpoint that triggers DWELL entry (default 1.0)
   };
 
   Params readParams();

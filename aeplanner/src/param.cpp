@@ -267,6 +267,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/tpm_rate", params.tpm_rate)) {
       ROS_WARN_STREAM("No viewplanner/tpm_rate specified. Default: " << params.tpm_rate);
     }
+    params.dwell_arrival_thresh = 1.0;
+    if (!ros::param::get(ns + "/viewplanner/dwell_arrival_thresh", params.dwell_arrival_thresh)) {
+      ROS_WARN_STREAM("No viewplanner/dwell_arrival_thresh specified. Default: " << params.dwell_arrival_thresh);
+    }
 
     return params;
   }

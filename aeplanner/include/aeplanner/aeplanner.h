@@ -98,6 +98,18 @@ private:
   bool          has_reposition_target_ = false;
   ScoredTarget  reposition_target_;
 
+  // Committed viewpoint for RESOLVE state — selected once per episode,
+  // then followed step-by-step until arrival triggers DWELL.
+  bool            has_committed_viewpoint_ = false;
+  Eigen::Vector4d committed_viewpoint_;
+  ScoredTarget    committed_target_;
+  PlannerState    prev_planner_state_ = PlannerState::EXPLORE;
+
+  // RRT*-planned waypoint sequence to the committed viewpoint.
+  // Re-planned whenever empty (new commitment or path blocked).
+  std::vector<Eigen::Vector4d> resolve_waypoints_;
+  int                          resolve_wp_idx_ = 0;
+
   // kd tree for finding nearest neighbours
   kdtree* kd_tree_;
 
@@ -132,12 +144,14 @@ private:
   Eigen::Vector4d sampleNewPoint();
   bool isInsideBoundaries(Eigen::Vector4d point);
   bool collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r);
-  RRTNode* chooseParent(RRTNode* node, double l);
+  RRTNode* chooseParent(RRTNode* node, double l, kdtree* tree);
   void rewire(kdtree* kd_tree, RRTNode* new_node, double l, double r, double r_os);
   Eigen::Vector4d restrictDistance(Eigen::Vector4d nearest, Eigen::Vector4d new_pos);
 
   std::pair<double, double> getGain(RRTNode* node);
   std::pair<double, double> gainCubature(Eigen::Vector4d state);
+
+  std::vector<Eigen::Vector4d> planPathToGoal(const Eigen::Vector4d& goal);
 
   // Priority voxel cache — computed once per planning cycle (expandRRT call)
   // so that the expensive map iteration in Step 1 is not repeated per RRT node.
