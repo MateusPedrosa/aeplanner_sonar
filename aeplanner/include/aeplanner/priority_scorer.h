@@ -25,11 +25,11 @@ struct ScorerParams
   float cluster_norm;     // normalisation for cluster density (default 100.0)
 };
 
-// Merges U-targets and frontier clusters into a single scored, sorted list.
-// fail_counts is a per-index vector updated by the blacklist; entries marked
-// blacklisted (fail_count < 0) are excluded.
+// Merges U-target clusters and frontier clusters into a single scored, sorted list.
+// u_voxels is needed to look up var_beta for each cluster member via member_indices.
 std::vector<ScoredTarget> scoreTargets(
-    const std::vector<ClassifiedVoxel>& u_targets,
+    const std::vector<FrontierCluster>& u_clusters,
+    const std::vector<ClassifiedVoxel>& u_voxels,
     const std::vector<FrontierCluster>& e_clusters,
     const ScorerParams& params);
 

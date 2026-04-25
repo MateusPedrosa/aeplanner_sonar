@@ -31,17 +31,28 @@ std::vector<ClassifiedVoxel> classifyVoxels(
     la3dm::State   s        = node.get_state();
     const float    res      = it.get_size();  // actual leaf size, not fine resolution
 
-    // --- U_TARGET: observed occupied voxel with sufficient variance ---
+    // --- U_TARGET: observed occupied surface voxel with sufficient variance ---
     if (node.classified && s == la3dm::State::OCCUPIED)
     {
       float var = node.get_var();
       if (var >= sigma2_thresh)
       {
-        result.push_back({
-          Eigen::Vector3d(loc.x(), loc.y(), loc.z()),
-          TargetType::U_TARGET,
-          var
-        });
+        bool adj_free = false;
+        for (int i = 0; i < 6 && !adj_free; ++i)
+        {
+          la3dm::OcTreeNode nb = map->search(
+              loc.x() + kNeighbourOffsets[i][0] * res,
+              loc.y() + kNeighbourOffsets[i][1] * res,
+              loc.z() + kNeighbourOffsets[i][2] * res);
+          if (nb.get_state() == la3dm::State::FREE)
+            adj_free = true;
+        }
+        if (adj_free)
+          result.push_back({
+            Eigen::Vector3d(loc.x(), loc.y(), loc.z()),
+            TargetType::U_TARGET,
+            var
+          });
       }
       continue;
     }

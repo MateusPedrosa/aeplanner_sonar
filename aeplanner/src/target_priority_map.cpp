@@ -50,6 +50,12 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
       frontier_voxels.push_back(v);
   }
 
+  // Cluster U_TARGETs (surface-filtered by classifier) so isolated uncertain
+  // voxels are ignored and spatially connected groups form one target each
+  std::vector<FrontierCluster> u_clusters = detectFrontierClusters(u_voxels, params_.R_cluster);
+  for (FrontierCluster& uc : u_clusters)
+    uc.type = TargetType::U_TARGET;
+
   // Cluster E_OCC and E_FREE frontiers separately so they are never mixed
   std::vector<ClassifiedVoxel> e_occ_voxels, e_free_voxels;
   e_occ_voxels.reserve(frontier_voxels.size());
@@ -84,7 +90,7 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
   sp.w_frontier   = params_.w_frontier;
   sp.cluster_norm = params_.cluster_norm;
 
-  std::vector<ScoredTarget> scored = scoreTargets(u_voxels, clusters, sp);
+  std::vector<ScoredTarget> scored = scoreTargets(u_clusters, u_voxels, clusters, sp);
 
   // Apply blacklist filter
   std::vector<ScoredTarget> filtered;

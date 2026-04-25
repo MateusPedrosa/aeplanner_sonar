@@ -227,7 +227,7 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/alpha_bias", params.alpha_bias)) {
       ROS_WARN_STREAM("No viewplanner/alpha_bias specified. Default: " << params.alpha_bias);
     }
-    params.lambda_dist = 0.2;
+    params.lambda_dist = 0.4;
     if (!ros::param::get(ns + "/viewplanner/lambda_dist", params.lambda_dist)) {
       ROS_WARN_STREAM("No viewplanner/lambda_dist specified. Default: " << params.lambda_dist);
     }

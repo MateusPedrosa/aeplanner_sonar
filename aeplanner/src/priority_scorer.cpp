@@ -5,24 +5,28 @@ namespace aeplanner
 {
 
 std::vector<ScoredTarget> scoreTargets(
-    const std::vector<ClassifiedVoxel>& u_targets,
+    const std::vector<FrontierCluster>& u_clusters,
+    const std::vector<ClassifiedVoxel>& u_voxels,
     const std::vector<FrontierCluster>& e_clusters,
     const ScorerParams& params)
 {
   std::vector<ScoredTarget> result;
-  result.reserve(u_targets.size() + e_clusters.size());
+  result.reserve(u_clusters.size() + e_clusters.size());
 
-  // U-targets: priority = Var_beta
-  for (const ClassifiedVoxel& v : u_targets)
+  // U-target clusters: priority = mean Var_beta of member voxels
+  for (const FrontierCluster& uc : u_clusters)
   {
-    // v_weak defaults to horizontal plane ⊥ zero; will be filled by caller
-    // from info-matrix eigenstruct when available.
+    float sum_var = 0.0f;
+    for (size_t idx : uc.member_indices)
+      sum_var += u_voxels[idx].var_beta;
+    float mean_var = sum_var / (float)uc.member_indices.size();
+
     result.push_back({
-      v.pos,
+      uc.centroid,
       TargetType::U_TARGET,
-      v.var_beta,
-      Eigen::Vector3d::UnitX(),  // placeholder; overwritten by TPM using eigenstruct
-      1.0f,
+      mean_var,
+      uc.w_normal >= 0.1f ? uc.normal : Eigen::Vector3d::UnitX(),
+      uc.w_normal,
       0
     });
   }
