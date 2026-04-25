@@ -79,11 +79,11 @@ namespace aeplanner
     if (!ros::param::get(ns + "/aep/tree/max_sampling_attempts", params.max_sampling_attempts)) {
       ROS_WARN_STREAM("No /aep/tree/max_sampling_attempts specified. Default: " << params.max_sampling_attempts);
     }
-    params.viz_rate = 2.0;
+    params.viz_rate = 0.5;
     if (!ros::param::get(ns + "/viz_rate", params.viz_rate)) {
       ROS_WARN_STREAM("No /viz_rate specified. Default: " << params.viz_rate);
     }
-    params.max_vis_radius = -1.0;
+    params.max_vis_radius = 30.0;
     if (!ros::param::get(ns + "/max_vis_radius", params.max_vis_radius)) {
       ROS_WARN_STREAM("No /max_vis_radius specified. Default: " << params.max_vis_radius << " (full map)");
     }
@@ -263,7 +263,7 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/w_normal_thresh", params.w_normal_thresh)) {
       ROS_WARN_STREAM("No viewplanner/w_normal_thresh specified. Default: " << params.w_normal_thresh);
     }
-    params.tpm_rate = 2.0;
+    params.tpm_rate = 0.5;
     if (!ros::param::get(ns + "/viewplanner/tpm_rate", params.tpm_rate)) {
       ROS_WARN_STREAM("No viewplanner/tpm_rate specified. Default: " << params.tpm_rate);
     }

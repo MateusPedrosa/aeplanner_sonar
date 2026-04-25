@@ -121,6 +121,10 @@ private:
   ros::Publisher rrt_marker_pub_;
   ros::Publisher gain_pub_;
   ros::Publisher bbx_marker_pub_;
+  ros::Publisher viewpoints_pub_;
+
+  // Accumulated sonar viewpoint history published after every map update
+  geometry_msgs::PoseArray viewpoints_msg_;
 
   // TF
   tf::TransformListener tf_listener_;
