@@ -371,6 +371,39 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       }
     }
 
+    // Proactively validate all remaining waypoint segments against the current
+    // map before commanding any movement. This catches map-update races before
+    // the robot reaches a blocked segment rather than after.
+    {
+      bool path_blocked = false;
+      for (int k = resolve_wp_idx_; k < (int)resolve_waypoints_.size(); ++k)
+      {
+        const Eigen::Vector4d& from = (k == resolve_wp_idx_)
+                                      ? current_state_
+                                      : resolve_waypoints_[k - 1];
+        if (collisionLine(from, resolve_waypoints_[k], params_.bounding_radius))
+        {
+          ROS_WARN("[RESOLVE] Upcoming path segment %d blocked; re-planning.", k);
+          path_blocked = true;
+          break;
+        }
+      }
+      if (path_blocked)
+      {
+        resolve_waypoints_.clear();
+        resolve_wp_idx_ = 0;
+        // Hold current position — getFrontiers() returns 0 nodes during RESOLVE
+        // (pigain only populated from EXPLORE/REPOSITION), which would cause
+        // rpl_exploration to declare exploration complete prematurely.
+        result.is_clear             = true;
+        result.pose.pose            = vecToPose(current_state_);
+        result.pose.header.stamp    = ros::Time::now();
+        result.pose.header.frame_id = params_.world_frame;
+        as_.setSucceeded(result);
+        return;
+      }
+    }
+
     // Step toward the current waypoint
     const Eigen::Vector4d& wp = resolve_waypoints_[resolve_wp_idx_];
     Eigen::Vector3d diff   = wp.head<3>() - current_state_.head<3>();
@@ -381,22 +414,6 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     Eigen::Vector4d next_pose;
     next_pose.head<3>() = current_state_.head<3>() + step * dir;
     next_pose[3]        = wp[3];  // forward yaw for intermediates, sensing yaw for final
-
-    if (collisionLine(current_state_, next_pose, params_.bounding_radius))
-    {
-      ROS_WARN("[RESOLVE] Path blocked; re-planning next iteration.");
-      resolve_waypoints_.clear();
-      resolve_wp_idx_ = 0;
-      // Hold current position — getFrontiers() returns 0 nodes during RESOLVE
-      // (pigain only populated from EXPLORE/REPOSITION), which would cause
-      // rpl_exploration to declare exploration complete prematurely.
-      result.is_clear             = true;
-      result.pose.pose            = vecToPose(current_state_);
-      result.pose.header.stamp    = ros::Time::now();
-      result.pose.header.frame_id = params_.world_frame;
-      as_.setSucceeded(result);
-      return;
-    }
 
     // ── Refresh committed viewpoint marker on every step ──────────────────
     {
@@ -775,6 +792,7 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
   RRTNode* best_goal_node = nullptr;
   double   best_goal_dist = std::numeric_limits<double>::max();
 
+  int dbg_no_parent = 0, dbg_unknown = 0, dbg_oob = 0, dbg_collision = 0, dbg_added = 0;
   for (int i = 0; i < params_.cutoff_iterations && ros::ok(); ++i)
   {
     // Goal-biased sampling: 30 % chance to sample the goal directly
@@ -787,7 +805,7 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
 
     // RRT*: pick best-cost parent among near neighbours
     RRTNode* nearest = chooseParent(new_node, params_.extension_range, path_kd);
-    if (!nearest) { delete new_node; continue; }
+    if (!nearest) { delete new_node; ++dbg_no_parent; continue; }
 
     new_node->state_ = restrictDistance(nearest->state_, sample);
 
@@ -796,12 +814,13 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
       std::shared_lock<std::shared_mutex> lock(ot_mutex_);
       if (ot_->search(new_node->state_[0], new_node->state_[1], new_node->state_[2])
               .get_state() == la3dm::State::UNKNOWN)
-        { delete new_node; continue; }
+        { delete new_node; ++dbg_unknown; continue; }
     }
     if (!isInsideBoundaries(new_node->state_))
-        { delete new_node; continue; }
+        { delete new_node; ++dbg_oob; continue; }
     if (collisionLine(nearest->state_, new_node->state_, params_.bounding_radius))
-        { delete new_node; continue; }
+        { delete new_node; ++dbg_collision; continue; }
+    ++dbg_added;
 
     new_node->parent_ = nearest;
     nearest->children_.push_back(new_node);
@@ -824,9 +843,21 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
       path.push_back(cur->state_);
     std::reverse(path.begin(), path.end());
 
-    // Snap last waypoint to exact goal so the sensing yaw is preserved exactly
-    if (!path.empty()) path.back() = goal;
-    else               path.push_back(goal);
+    // Snap last waypoint to exact goal so the sensing yaw is preserved exactly.
+    // Check the final edge first; if it collides, leave the last RRT node as-is
+    // so the robot arrives as close as possible without entering occupied space.
+    if (!path.empty())
+    {
+      const Eigen::Vector4d& pre = (path.size() >= 2) ? path[path.size()-2]
+                                                       : root->state_;
+      if (!collisionLine(pre, goal, params_.bounding_radius))
+        path.back() = goal;
+    }
+    else
+    {
+      if (!collisionLine(current_state_, goal, params_.bounding_radius))
+        path.push_back(goal);
+    }
 
     // Forward-facing yaw for every intermediate waypoint
     for (int i = 0; i + 1 < (int)path.size(); ++i)
@@ -842,7 +873,10 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
   delete root;
 
   ROS_INFO_STREAM("[RESOLVE] planPathToGoal: " << path.size()
-    << " waypoints, best_goal_dist=" << best_goal_dist << " m");
+    << " waypoints, best_goal_dist=" << best_goal_dist << " m"
+    << "  [added=" << dbg_added << " no_parent=" << dbg_no_parent
+    << " unknown=" << dbg_unknown << " oob=" << dbg_oob
+    << " collision=" << dbg_collision << "]");
   return path;
 }
 
