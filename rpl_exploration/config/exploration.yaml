@@ -1,7 +1,7 @@
 camera/horizontal_fov: 130.0
 camera/vertical_fov: 20.0
 
-raycast/dr:     0.1
+raycast/dr:     0.2
 raycast/dphi:   4
 raycast/dtheta: 10
 

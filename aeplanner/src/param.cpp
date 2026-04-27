@@ -79,13 +79,13 @@ namespace aeplanner
     if (!ros::param::get(ns + "/aep/tree/max_sampling_attempts", params.max_sampling_attempts)) {
       ROS_WARN_STREAM("No /aep/tree/max_sampling_attempts specified. Default: " << params.max_sampling_attempts);
     }
-    params.viz_rate = 0.5;
+    params.viz_rate = 0.2;
     if (!ros::param::get(ns + "/viz_rate", params.viz_rate)) {
       ROS_WARN_STREAM("No /viz_rate specified. Default: " << params.viz_rate);
     }
-    params.max_vis_radius = 30.0;
+    params.max_vis_radius = 20.0;
     if (!ros::param::get(ns + "/max_vis_radius", params.max_vis_radius)) {
-      ROS_WARN_STREAM("No /max_vis_radius specified. Default: " << params.max_vis_radius << " (full map)");
+      ROS_WARN_STREAM("No /max_vis_radius specified. Default: " << params.max_vis_radius);
     }
     params.zero_gain = 0.0;
     if (!ros::param::get(ns + "/aep/gain/zero", params.zero_gain)) {

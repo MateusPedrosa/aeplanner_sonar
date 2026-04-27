@@ -39,7 +39,11 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   double viz_period = (params_.viz_rate > 0.0) ? (1.0 / params_.viz_rate) : 0.5;
   viz_timer_ = nh_.createTimer(ros::Duration(viz_period), &AEPlanner::publishMapViz, this);
 
-  // Initialise Target Priority Map (in-process, shares ot_ read-only)
+  // Incremental voxel index — populated by cloudCallback, read by TPM.
+  occ_unk_idx_ = std::make_shared<OccupiedUnknownIndex>();
+  occ_unk_idx_->resolution = (float)params_.resolution;
+
+  // Initialise Target Priority Map (reads occ_unk_idx_, no ot_mutex_ needed)
   TPMParams tpm_params;
   tpm_params.sigma2_thresh = params_.sigma2_thresh;
   tpm_params.w_frontier    = params_.w_frontier;
@@ -52,7 +56,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   tpm_params.resolution    = params_.resolution;
   tpm_params.world_frame   = params_.world_frame;
 
-  tpm_ = std::make_unique<TargetPriorityMap>(nh_, ot_, ot_mutex_, tpm_params);
+  tpm_ = std::make_unique<TargetPriorityMap>(nh_, occ_unk_idx_, tpm_params);
 
   double tpm_period = (params_.tpm_rate > 0.0) ? (1.0 / params_.tpm_rate) : 0.5;
   tpm_timer_ = nh_.createTimer(ros::Duration(tpm_period),
@@ -71,20 +75,38 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
 void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 {
   aeplanner::aeplannerResult result;
+  const ros::WallTime t_exec_start = ros::WallTime::now();
+  // Thin wrapper: log state + elapsed time, then call setSucceeded.
+  auto succeed = [&](const char* state_tag) {
+    ROS_WARN_STREAM_THROTTLE(1.0,
+      "[EXEC_TIMING] state=" << state_tag
+      << "  elapsed=" << (ros::WallTime::now() - t_exec_start).toSec() << "s");
+    as_.setSucceeded(result);
+  };
 
   // Check if aeplanner has recieved agent's pose yet
   if (!current_state_initialized_)
   {
     ROS_WARN("Agent's pose not yet received");
     ROS_WARN("Make sure it is being published and correctly mapped");
-    as_.setSucceeded(result);
-    return;
+    succeed("NO_POSE"); return;
   }
   if (!ot_)
   {
     ROS_WARN("No octomap received");
-    as_.setSucceeded(result);
-    return;
+    succeed("NO_MAP"); return;
+  }
+
+  // Drain scan points queued by cloudCallback into the occupied-voxel snapshot.
+  // No ot_mutex_ acquired — cloudCallback pushes raw PCL points (already in
+  // world frame) to pending_occupied_points_ under pending_mutex_, and execute()
+  // (single-threaded action-server) drains them here under the same cheap mutex.
+  planning_snapshot_.resolution = ot_->get_resolution();
+  {
+    std::lock_guard<std::mutex> lk(pending_mutex_);
+    for (const auto& pt : pending_occupied_points_)
+      planning_snapshot_.insert(pt.x(), pt.y(), pt.z());
+    pending_occupied_points_.clear();
   }
 
   // State machine tick — determines EXPLORE/RESOLVE/DWELL/REPOSITION/DONE
@@ -129,8 +151,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     result.pose.pose = vecToPose(current_state_);
     result.pose.header.stamp    = ros::Time::now();
     result.pose.header.frame_id = params_.world_frame;
-    as_.setSucceeded(result);
-    return;
+    succeed("DWELL"); return;
   }
 
   // Handle DONE: no targets at all
@@ -138,8 +159,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
   {
     ROS_INFO("[VIEWPLANNER] No targets remaining. Mission complete.");
     result.is_clear = false;
-    as_.setSucceeded(result);
-    return;
+    succeed("DONE"); return;
   }
 
   // REPOSITION: select a global target to bias sampling toward
@@ -189,8 +209,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       if (tpm_targets.empty())
       {
         result.is_clear = false;
-        as_.setSucceeded(result);
-        return;
+        succeed("RESOLVE_NO_TARGETS"); return;
       }
 
       const ScoredTarget& top = tpm_targets[0];
@@ -233,8 +252,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         ROS_WARN("[RESOLVE] No valid candidate viewpoint found; deferring.");
         result.is_clear    = false;
         result.frontiers   = getFrontiers();
-        as_.setSucceeded(result);
-        return;
+        succeed("RESOLVE_NO_CANDIDATES"); return;
       }
 
       committed_target_        = top;
@@ -322,8 +340,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         result.pose.pose            = vecToPose(current_state_);
         result.pose.header.stamp    = ros::Time::now();
         result.pose.header.frame_id = params_.world_frame;
-        as_.setSucceeded(result);
-        return;
+        succeed("RESOLVE_PATH_FAIL"); return;
       }
 
       // Publish the full planned path as a LINE_STRIP
@@ -373,8 +390,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         result.pose.pose            = vecToPose(current_state_);
         result.pose.header.stamp    = ros::Time::now();
         result.pose.header.frame_id = params_.world_frame;
-        as_.setSucceeded(result);
-        return;
+        succeed("RESOLVE_ARRIVED"); return;
       }
     }
 
@@ -406,8 +422,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         result.pose.pose            = vecToPose(current_state_);
         result.pose.header.stamp    = ros::Time::now();
         result.pose.header.frame_id = params_.world_frame;
-        as_.setSucceeded(result);
-        return;
+        succeed("RESOLVE_PATH_BLOCKED"); return;
       }
     }
 
@@ -448,8 +463,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     result.pose.pose            = vecToPose(next_pose);
     result.pose.header.stamp    = ros::Time::now();
     result.pose.header.frame_id = params_.world_frame;
-    as_.setSucceeded(result);
-    return;
+    succeed("RESOLVE_STEP"); return;
   }
 
   prev_planner_state_ = planner_state;
@@ -473,7 +487,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     ROS_WARN("expandRRT returned no feasible node; reporting non-clear result so driver can re-route.");
     result.is_clear = false;
     result.frontiers = getFrontiers();
-    as_.setSucceeded(result);
+    succeed("EXPLORE_NO_NODE");
     delete root;
     kd_free(kd_tree_);
     return;
@@ -504,7 +518,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     best_branch_root_ = NULL;
   }
   prev_planner_state_ = planner_state;
-  as_.setSucceeded(result);
+  succeed("EXPLORE");
 
   ROS_DEBUG("Deleting/Freeing!");
   delete root;
@@ -572,12 +586,12 @@ void AEPlanner::expandRRT()
 {
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
 
-  // Pre-compute the priority voxel cache once for this planning cycle.
-  // All gainCubature calls within this expandRRT will reuse it, avoiding
-  // the expensive per-node map iteration.
-  priority_cache_valid_ = false;
+  // Refresh the priority voxel cache if the robot has moved enough; otherwise
+  // reuse the previous cycle's result. The O(N_all_leaves) shared_lock iteration
+  // inside computePriorityCache grows with FREE-voxel accumulation — rebuilding
+  // every 1.5 m of travel instead of every execute() tick keeps ot_mutex_ free.
   computePriorityCache();
-  ROS_INFO_STREAM("[NBV] Priority cache: " << priority_cache_.size() << " voxels");
+  ROS_DEBUG_STREAM("[NBV] Priority cache: " << priority_cache_.size() << " voxels");
 
   // Expand an RRT tree and calculate information gain in every node
   ROS_DEBUG_STREAM("Entering expanding RRT");
@@ -589,37 +603,7 @@ void AEPlanner::expandRRT()
   {
     ROS_DEBUG_STREAM("In expand RRT iteration: " << n);
 
-    // --- One-shot diagnostics on the very first iteration ---
-    if (n == 0) {
-      ROS_WARN_STREAM("[DIAG] expandRRT: robot at ("
-        << current_state_[0] << ", " << current_state_[1] << ", " << current_state_[2]
-        << "), sampling_radius=" << params_.max_sampling_radius);
-      // Count octree leaves by state near the robot
-      std::shared_lock<std::shared_mutex> diag_lock(ot_mutex_);
-      size_t free_ct = 0, occ_ct = 0, unk_ct = 0, unc_ct = 0;
-      la3dm::point3f robot_pt((float)current_state_[0], (float)current_state_[1], (float)current_state_[2]);
-      for (auto it = ot->begin_leaf_in_sphere(robot_pt, 10.0f); it != ot->end_leaf(); ++it) {
-        la3dm::State s = (*it).get_state();
-        if (s == la3dm::State::FREE)            ++free_ct;
-        else if (s == la3dm::State::OCCUPIED)   ++occ_ct;
-        else if (s == la3dm::State::UNCERTAIN)  ++unc_ct;
-        else                                    ++unk_ct;
-      }
-      ROS_WARN_STREAM("[DIAG] octree leaves within 10m: free=" << free_ct
-        << " occupied=" << occ_ct << " uncertain=" << unc_ct << " unknown=" << unk_ct);
-      // Sample 5 random points inside radius and log their state
-      for (int dbg = 0; dbg < 5; ++dbg) {
-        Eigen::Vector4d o = sampleNewPoint();
-        Eigen::Vector4d p = current_state_ + o;
-        la3dm::OcTreeNode r = ot->search(p[0], p[1], p[2]);
-        const char* st = (r.get_state()==la3dm::State::FREE) ? "FREE" :
-                         (r.get_state()==la3dm::State::OCCUPIED) ? "OCC" :
-                         (r.get_state()==la3dm::State::UNCERTAIN) ? "UNC" : "UNK";
-        ROS_WARN_STREAM("[DIAG] sample " << dbg << ": ("
-          << p[0] << "," << p[1] << "," << p[2] << ") -> " << st);
-      }
-    }
-    // ---------------------------------------------------------
+
 
     RRTNode* new_node = new RRTNode();
     RRTNode* nearest;
@@ -954,8 +938,16 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
 void AEPlanner::computePriorityCache()
 {
   // Step 1 of PDF §7: rank voxels by priority = Var_beta × directional_imbalance.
-  // Computed once per planning cycle from the robot's current position so it is
-  // not repeated for every RRT node candidate.
+  // Skip rebuild if the robot hasn't moved significantly — the leaf iteration
+  // under shared_lock is O(N_all_leaves_in_sphere) and grows as FREE voxels
+  // accumulate from sonar sweeps. A 1.5 m threshold is well below r_max so the
+  // visible set barely changes, but the rebuild rate drops to once per 1.5 m of
+  // travel rather than once per execute() tick.
+  constexpr double kRebuildDist = 1.5;
+  if (priority_cache_valid_ &&
+      (current_state_.head<3>() - priority_cache_built_pos_).norm() < kRebuildDist)
+    return;
+
   priority_cache_.clear();
 
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
@@ -968,8 +960,10 @@ void AEPlanner::computePriorityCache()
 
   priority_cache_.reserve(4096);
 
+  ros::WallTime t_cache_lock_start = ros::WallTime::now();
   {
     std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+    ros::WallTime t_cache_locked = ros::WallTime::now();
 
     for (auto it = ot->begin_leaf_in_sphere(t_plan_p3f, (float)params_.r_max);
          it != ot->end_leaf(); ++it)
@@ -1000,6 +994,12 @@ void AEPlanner::computePriorityCache()
       priority_cache_.push_back({p_k, priority,
                                  Eigen::Vector3d(v_weak_p3f.x(), v_weak_p3f.y(), v_weak_p3f.z())});
     }
+    ros::WallTime t_cache_done = ros::WallTime::now();
+    ROS_WARN_THROTTLE(5.0,
+      "[CACHE_TIMING] lock_wait=%.3fs  lock_held=%.3fs  voxels_found=%zu",
+      (t_cache_locked     - t_cache_lock_start).toSec(),
+      (t_cache_done       - t_cache_locked).toSec(),
+      priority_cache_.size());
   } // shared_lock released — map read complete
 
   // Top-K selection does not access the map; run without holding the lock.
@@ -1013,19 +1013,17 @@ void AEPlanner::computePriorityCache()
     priority_cache_.resize(K);
   }
 
-  priority_cache_valid_ = true;
+  priority_cache_valid_    = true;
+  priority_cache_built_pos_ = current_state_.head<3>();
   ROS_DEBUG_STREAM("computePriorityCache: " << priority_cache_.size()
                    << " priority voxels (r_max=" << params_.r_max << ")");
 }
 
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 {
-  // Evaluate information gain at the yaw given by state[3].
-  // The cache is built once per planning cycle by computePriorityCache().
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Waiting for shared_lock (read)");
-  std::shared_lock<std::shared_mutex> lock(ot_mutex_);
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Acquired shared_lock");
-
+  // No lock — reads planning_snapshot_ built at the top of execute().
+  // Occlusion check uses a linear ray march against the snapshot instead of
+  // the RayCaster (which required a live map read per traversal step).
   tf::Vector3 base_origin(state[0], state[1], state[2]);
 
   tf::StampedTransform base_to_sensor;
@@ -1041,6 +1039,7 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
   const double vfov_rad = params_.vfov * M_PI / 180.0;
   const double r_max    = params_.r_max;
   const double r_min    = params_.r_min;
+  const float  snap_res = planning_snapshot_.resolution;
 
   tf::Quaternion base_quat;
   base_quat.setEuler(0.0, 0.0, state[3]);
@@ -1079,24 +1078,23 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
     Eigen::Vector4d pv4(pv.pos.x(), pv.pos.y(), pv.pos.z(), 0);
     if (!isInsideBoundaries(pv4)) continue;
 
-    // Occlusion check via RayCaster — runs only on FOV-surviving voxels
+    // Occlusion check: linear march from sensor toward voxel, step = resolution.
+    // Any snapshot-occupied voxel closer than snap_res to the target voxel is
+    // the target itself — stop without declaring occlusion.
     {
-      std::shared_ptr<la3dm::BGKLOctoMap> ot_local = ot_;
-      la3dm::point3f t_p3f((float)t_cand.x(), (float)t_cand.y(), (float)t_cand.z());
-      la3dm::point3f pv_p3f((float)pv.pos.x(), (float)pv.pos.y(), (float)pv.pos.z());
-      la3dm::BGKLOctoMap::RayCaster rc(ot_local.get(), t_p3f, pv_p3f);
-      la3dm::point3f rp; la3dm::OcTreeNode rn;
-      la3dm::BlockHashKey rbk; la3dm::OcTreeHashKey rnk;
+      const int n_steps = static_cast<int>(range / snap_res) + 1;
       bool occluded = false;
-      while (!rc.end()) {
-        if (rc.next(rp, rn, rbk, rnk)) {
-          if (rn.get_state() == la3dm::State::OCCUPIED) {
-            float dx = rp.x()-pv_p3f.x(), dy = rp.y()-pv_p3f.y(), dz = rp.z()-pv_p3f.z();
-            if (std::sqrt(dx*dx + dy*dy + dz*dz) > (float)params_.resolution) {
-              occluded = true; break;
-            }
-          }
-        }
+      for (int s = 1; s < n_steps && !occluded; ++s)
+      {
+        Eigen::Vector3d pt = t_cand + s * static_cast<double>(snap_res) * los_k;
+        float dx = static_cast<float>(pt.x() - pv.pos.x());
+        float dy = static_cast<float>(pt.y() - pv.pos.y());
+        float dz = static_cast<float>(pt.z() - pv.pos.z());
+        if (std::sqrt(dx*dx + dy*dy + dz*dz) <= snap_res) break;  // reached target
+        if (planning_snapshot_.occupied(static_cast<float>(pt.x()),
+                                        static_cast<float>(pt.y()),
+                                        static_cast<float>(pt.z())))
+          occluded = true;
       }
       if (occluded) continue;
     }
@@ -1114,7 +1112,6 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 
   ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2]
                    << ") yaw=" << (state[3] * 180.0 / M_PI) << " deg  score: " << score);
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] gainCubature: Releasing shared_lock and returning");
   return std::make_pair(score, state[3]);
 }
 
@@ -1149,43 +1146,38 @@ bool AEPlanner::isInsideBoundaries(Eigen::Vector4d point)
          point[2] > params_.boundary_min[2] and point[2] < params_.boundary_max[2];
 }
 
+
 bool AEPlanner::collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r)
 {
-  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Waiting for shared_lock (read)");
-  std::shared_lock<std::shared_mutex> lock(ot_mutex_);
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Acquired shared_lock");
-  ROS_DEBUG_STREAM("In collision");
-  octomap::point3d start(p1[0], p1[1], p1[2]);
-  octomap::point3d end(p2[0], p2[1], p2[2]);
+  // No lock — reads planning_snapshot_ built at the top of execute().
+  // Hash lookups replace per-cell octree searches, and the map writer is free
+  // to insert new pointclouds throughout the entire planning loop.
+  const float res = planning_snapshot_.resolution;
 
-  float res = ot->get_resolution();
-  float min_x = std::min(p1[0], p2[0]) - r;
-  float min_y = std::min(p1[1], p2[1]) - r;
-  float min_z = std::min(p1[2], p2[2]) - r;
-  float max_x = std::max(p1[0], p2[0]) + r;
-  float max_y = std::max(p1[1], p2[1]) + r;
-  float max_z = std::max(p1[2], p2[2]) + r;
+  octomap::point3d start((float)p1[0], (float)p1[1], (float)p1[2]);
+  octomap::point3d end((float)p2[0], (float)p2[1], (float)p2[2]);
+
+  float min_x = std::min((float)p1[0], (float)p2[0]) - (float)r;
+  float min_y = std::min((float)p1[1], (float)p2[1]) - (float)r;
+  float min_z = std::min((float)p1[2], (float)p2[2]) - (float)r;
+  float max_x = std::max((float)p1[0], (float)p2[0]) + (float)r;
+  float max_y = std::max((float)p1[1], (float)p2[1]) + (float)r;
+  float max_z = std::max((float)p1[2], (float)p2[2]) + (float)r;
   double lsq = (end - start).norm_sq();
   double rsq = r * r;
 
   for (float x = min_x; x <= max_x; x += res) {
     for (float y = min_y; y <= max_y; y += res) {
       for (float z = min_z; z <= max_z; z += res) {
-        la3dm::OcTreeNode node = ot->search(x, y, z);
-        if (node.get_state() == la3dm::State::OCCUPIED) {
+        if (planning_snapshot_.occupied(x, y, z)) {
           octomap::point3d pt(x, y, z);
-          if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r) {
-            ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Releasing shared_lock and returning true");
+          if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 || (end - pt).norm() < r)
             return true;
-          }
         }
       }
     }
   }
-  ROS_DEBUG_STREAM("In collision (exiting)");
 
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] collisionLine: Releasing shared_lock and returning false");
   return false;
 }
 
@@ -1230,7 +1222,7 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 
   // Phase 1: prepare — downsampling, ray tracing, BGKL kernel training.
   // Does not access block_arr; no lock required.
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: Running prepare phase (no lock)");
+  auto t_prepare_start = ros::WallTime::now();
   auto prepared = ot_->prepare_pointcloud_update(
       *pcl_cloud, origin, sensor_up,
       params_.ds_resolution, params_.free_resolution, params_.r_max);
@@ -1238,16 +1230,69 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   if (prepared.empty) return;
 
   // Phase 2: commit — writes block_arr. Hold unique_lock only for this fast phase.
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: Waiting for unique_lock (write)");
+  auto t_lock_wait_start = ros::WallTime::now();
   std::unique_lock<std::shared_mutex> lock(ot_mutex_);
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: Acquired unique_lock, committing pointcloud");
+  auto t_lock_acquired = ros::WallTime::now();
   ot_->commit_pointcloud_update(prepared);
-  ROS_DEBUG_STREAM("[DEBUG_AEPLANNER] cloudCallback: commit done, lock released");
+  auto t_committed = ros::WallTime::now();
+
+  // Phase 3: populate incremental index — while still holding unique_lock so
+  // map->search() reads are consistent with the just-committed scan.
+  // Cost: N_scan × 7 targeted lookups ≈ a few ms, negligible vs commit.
+  if (occ_unk_idx_)
+  {
+    const float res = occ_unk_idx_->resolution;
+    static const float kOff[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    std::unique_lock<std::shared_mutex> idx_lk(occ_unk_idx_->mtx);
+    for (const auto& pt : *pcl_cloud)
+    {
+      // Update the scan point itself
+      int64_t k = OccupiedUnknownIndex::packKey(pt.x, pt.y, pt.z, res);
+      la3dm::OcTreeNode nd = ot_->search(pt.x, pt.y, pt.z);
+      occ_unk_idx_->cells[k] = {
+          Eigen::Vector3f(pt.x, pt.y, pt.z),
+          nd.get_state(), nd.get_var(), res, nd.classified};
+      // Update 6-connected neighbours (only if not already in index,
+      // to avoid overwriting a more recent state from a prior scan)
+      for (const auto& off : kOff)
+      {
+        float nx = pt.x + off[0] * res;
+        float ny = pt.y + off[1] * res;
+        float nz = pt.z + off[2] * res;
+        int64_t nk = OccupiedUnknownIndex::packKey(nx, ny, nz, res);
+        if (occ_unk_idx_->cells.count(nk) == 0)
+        {
+          la3dm::OcTreeNode nn = ot_->search(nx, ny, nz);
+          occ_unk_idx_->cells[nk] = {
+              Eigen::Vector3f(nx, ny, nz),
+              nn.get_state(), nn.get_var(), res, nn.classified};
+        }
+      }
+    }
+  }
+
   lock.unlock();
+  ROS_WARN_THROTTLE(2.0,
+    "[CB_TIMING] prepare=%.3fs  wait_for_lock=%.3fs  commit=%.3fs",
+    (t_lock_wait_start - t_prepare_start).toSec(),
+    (t_lock_acquired   - t_lock_wait_start).toSec(),
+    (t_committed       - t_lock_acquired).toSec());
   // 'prepared' destructor runs here, freeing BGKL3f objects (after lock release)
 
+  // Queue scan points for the planning snapshot.
+  // execute() drains this into planning_snapshot_ at the top of each tick.
+  // No ot_mutex_ needed — pcl_cloud is already in world frame.
+  {
+    std::lock_guard<std::mutex> lk(pending_mutex_);
+    pending_occupied_points_.reserve(pending_occupied_points_.size() + pcl_cloud->size());
+    for (const auto& pt : *pcl_cloud)
+      pending_occupied_points_.emplace_back(pt.x, pt.y, pt.z);
+  }
+
   // Publish viewpoint history so callers can monitor the sonar update rate.
-  // Latched: new subscribers always receive the full history without periodic republish.
+  // Latched: new subscribers always receive the buffered history without
+  // periodic republish. Bounded ring — the message size is O(1) regardless of
+  // run length, so per-callback serialisation cost stays constant.
   {
     geometry_msgs::Pose pose;
     pose.position.x = origin.x();
@@ -1258,7 +1303,12 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
     pose.orientation.y = orientation.y();
     pose.orientation.z = orientation.z();
     pose.orientation.w = orientation.w();
+
+    constexpr size_t kMaxViewpointHistory = 200;
+    if (viewpoints_msg_.poses.size() >= kMaxViewpointHistory)
+      viewpoints_msg_.poses.erase(viewpoints_msg_.poses.begin());
     viewpoints_msg_.poses.push_back(pose);
+
     viewpoints_msg_.header.frame_id = params_.world_frame;
     viewpoints_msg_.header.stamp    = ros::Time::now();
     viewpoints_pub_.publish(viewpoints_msg_);
@@ -1270,6 +1320,16 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   if (!ot_)
     return;
 
+  // Skip the snapshot+lock entirely when no one is listening — the loop below
+  // is O(N_leaves_in_sphere) under shared_lock and adds avoidable contention
+  // with cloudCallback's writer lock as the map grows. Latched topics replay
+  // the most recently published message on subscriber connect, so an RViz
+  // session starting later still gets the previous snapshot until the next tick.
+  if (m_pub_occ_->getNumSubscribers() == 0 &&
+      m_pub_unc_->getNumSubscribers() == 0 &&
+      m_pub_var_->getNumSubscribers() == 0)
+    return;
+
   // Snapshot occupied/uncertain voxels under the shared_lock.
   // FREE and UNKNOWN are not visualised, so only ~(occupied+uncertain) entries
   // are collected — typically a tiny fraction of the total leaf count.
@@ -1279,8 +1339,10 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   std::vector<VoxelViz> snaps;
   snaps.reserve(8192);
 
+  ros::WallTime t_viz_lock_start = ros::WallTime::now();
   {
     std::shared_lock<std::shared_mutex> lock(ot_mutex_);
+    ros::WallTime t_viz_locked = ros::WallTime::now();
 
     la3dm::point3f viz_center((float)current_state_[0],
                               (float)current_state_[1],
@@ -1297,6 +1359,15 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
                          it.get_node().get_var(), state});
       }
     }
+    ros::WallTime t_viz_done = ros::WallTime::now();
+    ROS_WARN_THROTTLE(5.0,
+      "[VIZ_TIMING] lock_wait=%.3fs  lock_held=%.3fs  snaps=%zu  subs: occ=%u unc=%u var=%u",
+      (t_viz_locked - t_viz_lock_start).toSec(),
+      (t_viz_done   - t_viz_locked).toSec(),
+      snaps.size(),
+      m_pub_occ_->getNumSubscribers(),
+      m_pub_unc_->getNumSubscribers(),
+      m_pub_var_->getNumSubscribers());
   } // shared_lock released — map iteration complete
 
   // Build marker arrays and publish without holding the map lock.

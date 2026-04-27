@@ -5,6 +5,8 @@
 
 #include <mutex>
 #include <shared_mutex>
+#include <unordered_set>
+#include <cmath>
 
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/PoseArray.h>
@@ -50,6 +52,47 @@
 
 namespace aeplanner
 {
+
+// Snapshot of occupied voxels built once per execute() tick under a single
+// short shared_lock. All collision and gain computation during that tick uses
+// this copy, keeping ot_mutex_ free for cloudCallback inserts throughout the
+// entire planning loop.
+struct OccupiedSnapshot
+{
+  std::unordered_set<int64_t> keys;
+  float resolution = 0.1f;
+
+  // 21 bits per axis, offset so negative coordinates map cleanly.
+  // Supports ±1,048,576 voxels per axis = ±104 km at 0.1 m resolution.
+  static constexpr int32_t COORD_OFFSET = 1 << 20;
+
+  static int64_t packKey(int32_t ix, int32_t iy, int32_t iz)
+  {
+    uint32_t ux = static_cast<uint32_t>(ix + COORD_OFFSET) & 0x1FFFFFu;
+    uint32_t uy = static_cast<uint32_t>(iy + COORD_OFFSET) & 0x1FFFFFu;
+    uint32_t uz = static_cast<uint32_t>(iz + COORD_OFFSET) & 0x1FFFFFu;
+    return (static_cast<int64_t>(ux) << 42) |
+           (static_cast<int64_t>(uy) << 21) |
+            static_cast<int64_t>(uz);
+  }
+
+  void insert(float x, float y, float z)
+  {
+    keys.insert(packKey(static_cast<int32_t>(std::floor(x / resolution)),
+                        static_cast<int32_t>(std::floor(y / resolution)),
+                        static_cast<int32_t>(std::floor(z / resolution))));
+  }
+
+  bool occupied(float x, float y, float z) const
+  {
+    return keys.count(packKey(static_cast<int32_t>(std::floor(x / resolution)),
+                               static_cast<int32_t>(std::floor(y / resolution)),
+                               static_cast<int32_t>(std::floor(z / resolution)))) > 0;
+  }
+
+  bool empty() const { return keys.empty(); }
+};
+
 class AEPlanner
 {
 private:
@@ -68,10 +111,12 @@ private:
 
   std::shared_ptr<la3dm::BGKLOctoMap> ot_;
   // Reader-writer lock for ot_:
-  //   cloudCallback (insert_pointcloud) → unique_lock (exclusive write)
-  //   gainCubature / collisionLine (search) → shared_lock (concurrent reads)
-  //   publishMapViz (begin_leaf iteration) → try shared_lock, skip if writer active
-  // Multiple readers proceed simultaneously; only the writer blocks all.
+  //   cloudCallback (insert_pointcloud)  → unique_lock (exclusive write)
+  //   computePriorityCache               → shared_lock, held for one leaf iteration
+  //   publishMapViz                      → try shared_lock, skip if writer active
+  //   collisionLine / gainCubature       → NO lock (use planning_snapshot_ instead)
+  // cloudCallback's unique_lock is only blocked by the brief cache/viz iterations;
+  // all planning computation runs lock-free against planning_snapshot_.
   mutable std::shared_mutex ot_mutex_;
 
   la3dm::MarkerArrayPub *m_pub_occ_, *m_pub_free_, *m_pub_unc_, *m_pub_unk_, *m_pub_var_;
@@ -80,6 +125,10 @@ private:
   // Timer that drives voxel visualization independently of the sonar
   // callback, so a growing map does not starve cloudCallback.
   ros::Timer viz_timer_;
+
+  // Incremental index of occupied+neighbour voxels, populated by cloudCallback
+  // after each commit so TPM never needs to acquire ot_mutex_.
+  std::shared_ptr<OccupiedUnknownIndex> occ_unk_idx_;
 
   // Target Priority Map — runs as a ros::Timer callback inside this process.
   std::unique_ptr<TargetPriorityMap> tpm_;
@@ -157,6 +206,17 @@ private:
 
   std::vector<Eigen::Vector4d> planPathToGoal(const Eigen::Vector4d& goal);
 
+  // Occupied-voxel snapshot used by collisionLine and gainCubature.
+  // Written exclusively by execute() (single-threaded action-server callback);
+  // no mutex needed for planning_snapshot_ itself.
+  OccupiedSnapshot planning_snapshot_;
+
+  // cloudCallback appends scan points here after each map commit.
+  // execute() drains the queue into planning_snapshot_ at the start of each
+  // tick. This keeps ot_mutex_ free throughout the entire planning loop.
+  std::vector<Eigen::Vector3f> pending_occupied_points_;
+  std::mutex                   pending_mutex_;
+
   // Priority voxel cache — computed once per planning cycle (expandRRT call)
   // so that the expensive map iteration in Step 1 is not repeated per RRT node.
   struct PriorityVoxel {
@@ -165,7 +225,8 @@ private:
     Eigen::Vector3d v_weak;  // world-frame unit weak arc direction
   };
   std::vector<PriorityVoxel> priority_cache_;
-  bool priority_cache_valid_ = false;
+  bool             priority_cache_valid_    = false;
+  Eigen::Vector3d  priority_cache_built_pos_ = Eigen::Vector3d::Zero();
   void computePriorityCache();
 
   // ---------------- Helpers ----------------

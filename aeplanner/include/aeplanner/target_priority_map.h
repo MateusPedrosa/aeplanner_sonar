@@ -34,15 +34,14 @@ struct TPMParams
   std::string world_frame; // TF frame for published messages (default "world")
 };
 
-// In-process Target Priority Map. Runs as a ros::Timer callback that shares
-// the BGKLOctoMap pointer (read-only) with the planner. Thread-safe: the map
-// shared_mutex is held as a shared_lock during iteration.
+// In-process Target Priority Map. Runs as a ros::Timer callback that reads
+// the OccupiedUnknownIndex (populated by cloudCallback after each commit).
+// No ot_mutex_ access — TPM and cloudCallback are decoupled via the index.
 class TargetPriorityMap
 {
 public:
   TargetPriorityMap(ros::NodeHandle& nh,
-                    const std::shared_ptr<la3dm::BGKLOctoMap>& map,
-                    std::shared_mutex& map_mutex,
+                    const std::shared_ptr<OccupiedUnknownIndex>& idx,
                     const TPMParams& params);
 
   // Timer callback — classifies, clusters, scores, publishes /tpm/targets.
@@ -65,8 +64,7 @@ private:
   ros::Publisher                          viz_pub_;
   ros::Publisher                          clusters_pub_;
 
-  std::shared_ptr<la3dm::BGKLOctoMap>     map_;
-  std::shared_mutex&                      map_mutex_;
+  std::shared_ptr<OccupiedUnknownIndex>    idx_;
 
   TPMParams params_;
   Blacklist blacklist_;
