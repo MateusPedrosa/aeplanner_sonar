@@ -10,13 +10,14 @@ viewplanner:
   # Frontier detection
   R_cluster:           2.0     # Frontier clustering radius (m)
   w_normal_thresh:     0.4     # Min PCA anisotropy for reliable frontier normal
+  min_cluster_size:    15       # Min voxels per cluster to be a valid frontier target (filters downsampling artifacts)
 
   # State machine
   alpha_bias:          1.0     # U vs E priority bias (1.0 = no bias)
   local_radius:        10.0    # Radius of "local volume" for EXPLORE vs REPOSITION (m)
 
   # Pose scoring and sampling
-  lambda_dist:         0.2     # Exponential distance penalty: score *= exp(-lambda_dist * dist)
+  lambda_dist:         0.5     # Exponential distance penalty: score *= exp(-lambda_dist * dist)
   d_standoff:          4.0     # Nominal sonar standoff for viewpoint placement (m)
   R_sample:            8.0     # Hemisphere sampling radius around target (m)
   N_samples:           50      # Hemisphere pose samples per target

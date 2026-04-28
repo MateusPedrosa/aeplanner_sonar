@@ -271,6 +271,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/dwell_arrival_thresh", params.dwell_arrival_thresh)) {
       ROS_WARN_STREAM("No viewplanner/dwell_arrival_thresh specified. Default: " << params.dwell_arrival_thresh);
     }
+    params.min_cluster_size = 5;
+    if (!ros::param::get(ns + "/viewplanner/min_cluster_size", params.min_cluster_size)) {
+      ROS_WARN_STREAM("No viewplanner/min_cluster_size specified. Default: " << params.min_cluster_size);
+    }
 
     // --- Exploration gain parameters ---
     params.n_explore_rays_az = 15;

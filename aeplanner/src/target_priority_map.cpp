@@ -78,6 +78,17 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
   std::vector<FrontierCluster> occ_clusters  = detectFrontierClusters(e_occ_voxels,  params_.R_cluster);
   std::vector<FrontierCluster> free_clusters = detectFrontierClusters(e_free_voxels, params_.R_cluster);
 
+  // Drop clusters that are too small — these are typically downsampling artifacts
+  // (isolated unknown voxels surrounded by free space) rather than real frontiers.
+  {
+    const size_t min_sz = static_cast<size_t>(std::max(1, params_.min_cluster_size));
+    auto too_small = [min_sz](const FrontierCluster& c){
+      return c.member_indices.size() < min_sz;
+    };
+    occ_clusters.erase( std::remove_if(occ_clusters.begin(),  occ_clusters.end(),  too_small), occ_clusters.end());
+    free_clusters.erase(std::remove_if(free_clusters.begin(), free_clusters.end(), too_small), free_clusters.end());
+  }
+
   // Offset free-cluster member_indices so they index into the combined voxel vector
   const size_t occ_offset = e_occ_voxels.size();
   for (FrontierCluster& c : free_clusters)

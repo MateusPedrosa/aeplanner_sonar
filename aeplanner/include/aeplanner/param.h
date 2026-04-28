@@ -85,6 +85,7 @@ namespace aeplanner
     float  w_normal_thresh;     // min PCA anisotropy for reliable frontier normal (default 0.4)
     double tpm_rate;            // TPM update rate in Hz (default 2.0)
     double dwell_arrival_thresh; // dist to committed viewpoint that triggers DWELL entry (default 1.0)
+    int    min_cluster_size;    // min voxels per frontier cluster to be considered a target (default 5)
 
     // --- Exploration gain parameters ---
     int    n_explore_rays_az;     // azimuth ray count for gainExploration (default 15)
