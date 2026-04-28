@@ -319,6 +319,24 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           viz.markers.push_back(m);
         }
 
+        // Committed target — magenta sphere at the U_TARGET position
+        {
+          visualization_msgs::Marker m;
+          m.header.stamp    = ros::Time::now();
+          m.header.frame_id = params_.world_frame;
+          m.ns = "resolve_target"; m.id = 0;
+          m.type   = visualization_msgs::Marker::SPHERE;
+          m.action = visualization_msgs::Marker::ADD;
+          m.pose.position.x = committed_target_.pos.x();
+          m.pose.position.y = committed_target_.pos.y();
+          m.pose.position.z = committed_target_.pos.z();
+          m.pose.orientation.w = 1.0;
+          m.scale.x = m.scale.y = m.scale.z = 1.0;
+          m.color.r = 1.0; m.color.g = 0.0; m.color.b = 1.0; m.color.a = 1.0;
+          m.lifetime = ros::Duration(0);
+          viz.markers.push_back(m);
+        }
+
         rrt_marker_pub_.publish(viz);
       }
     }
@@ -437,9 +455,10 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     next_pose.head<3>() = current_state_.head<3>() + step * dir;
     next_pose[3]        = wp[3];  // forward yaw for intermediates, sensing yaw for final
 
-    // ── Refresh committed viewpoint marker on every step ──────────────────
+    // ── Refresh committed viewpoint + target markers on every step ───────
     {
       visualization_msgs::MarkerArray viz;
+
       visualization_msgs::Marker vp;
       vp.header.stamp    = ros::Time::now();
       vp.header.frame_id = params_.world_frame;
@@ -456,6 +475,22 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       vp.color.r = 0.0; vp.color.g = 1.0; vp.color.b = 0.0; vp.color.a = 1.0;
       vp.lifetime = ros::Duration(0);
       viz.markers.push_back(vp);
+
+      visualization_msgs::Marker tgt;
+      tgt.header.stamp    = ros::Time::now();
+      tgt.header.frame_id = params_.world_frame;
+      tgt.ns = "resolve_target"; tgt.id = 0;
+      tgt.type   = visualization_msgs::Marker::SPHERE;
+      tgt.action = visualization_msgs::Marker::ADD;
+      tgt.pose.position.x = committed_target_.pos.x();
+      tgt.pose.position.y = committed_target_.pos.y();
+      tgt.pose.position.z = committed_target_.pos.z();
+      tgt.pose.orientation.w = 1.0;
+      tgt.scale.x = tgt.scale.y = tgt.scale.z = 1.0;
+      tgt.color.r = 1.0; tgt.color.g = 0.0; tgt.color.b = 1.0; tgt.color.a = 1.0;
+      tgt.lifetime = ros::Duration(0);
+      viz.markers.push_back(tgt);
+
       rrt_marker_pub_.publish(viz);
     }
 
@@ -1252,22 +1287,37 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
       occ_unk_idx_->cells[k] = {
           Eigen::Vector3f(pt.x, pt.y, pt.z),
           nd.get_state(), nd.get_var(), res, nd.classified};
-      // Update 6-connected neighbours (only if not already in index,
-      // to avoid overwriting a more recent state from a prior scan)
       for (const auto& off : kOff)
       {
         float nx = pt.x + off[0] * res;
         float ny = pt.y + off[1] * res;
         float nz = pt.z + off[2] * res;
         int64_t nk = OccupiedUnknownIndex::packKey(nx, ny, nz, res);
-        if (occ_unk_idx_->cells.count(nk) == 0)
-        {
-          la3dm::OcTreeNode nn = ot_->search(nx, ny, nz);
-          occ_unk_idx_->cells[nk] = {
-              Eigen::Vector3f(nx, ny, nz),
-              nn.get_state(), nn.get_var(), res, nn.classified};
-        }
+        la3dm::OcTreeNode nn = ot_->search(nx, ny, nz);
+        occ_unk_idx_->cells[nk] = {
+            Eigen::Vector3f(nx, ny, nz),
+            nn.get_state(), nn.get_var(), res, nn.classified};
       }
+    }
+
+    // Refresh all OCCUPIED+high-var index entries within sensor range.
+    // Ray-tracing can free voxels that are not scan-point neighbours, leaving
+    // stale OCCUPIED entries that the TPM would report as spurious U_TARGETs.
+    // Filtering to OCCUPIED+high-var keeps this O(small) in a converged map.
+    const float r_max2 = (float)(params_.r_max * params_.r_max);
+    for (auto& kv : occ_unk_idx_->cells)
+    {
+      if (kv.second.state != la3dm::State::OCCUPIED) continue;
+      if (kv.second.var < params_.sigma2_thresh) continue;
+      const Eigen::Vector3f& pos = kv.second.pos;
+      float dx = pos.x() - origin.x();
+      float dy = pos.y() - origin.y();
+      float dz = pos.z() - origin.z();
+      if (dx*dx + dy*dy + dz*dz > r_max2) continue;
+      la3dm::OcTreeNode nd2 = ot_->search(pos.x(), pos.y(), pos.z());
+      kv.second.state      = nd2.get_state();
+      kv.second.var        = nd2.get_var();
+      kv.second.classified = nd2.classified;
     }
   }
 

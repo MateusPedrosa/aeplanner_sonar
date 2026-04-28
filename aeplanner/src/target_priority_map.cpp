@@ -15,9 +15,10 @@ TargetPriorityMap::TargetPriorityMap(
   , blacklist_(params.n_fail, params.t_cooldown)
   , robot_pos_(Eigen::Vector3d::Zero())
 {
-  targets_pub_  = nh.advertise<aeplanner::TargetList>("/tpm/targets", 1, true);
-  viz_pub_      = nh.advertise<visualization_msgs::MarkerArray>("/tpm/targets_viz", 1, true);
-  clusters_pub_ = nh.advertise<visualization_msgs::MarkerArray>("/tpm/clusters_viz", 1, true);
+  targets_pub_    = nh.advertise<aeplanner::TargetList>("/tpm/targets", 1, true);
+  viz_pub_        = nh.advertise<visualization_msgs::MarkerArray>("/tpm/targets_viz", 1, true);
+  clusters_pub_   = nh.advertise<visualization_msgs::MarkerArray>("/tpm/clusters_viz", 1, true);
+  u_clusters_pub_ = nh.advertise<visualization_msgs::MarkerArray>("/tpm/u_clusters_viz", 1, true);
 }
 
 void TargetPriorityMap::update(const ros::TimerEvent&)
@@ -31,26 +32,30 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
   }
 
   // Read from the incremental OccupiedUnknownIndex — no ot_mutex_ needed.
-  // cloudCallback populates the index after each commit under its own light mutex.
+  // U_TARGETs are extracted globally (no distance limit) so that high-variance
+  // voxels observed in earlier passes are not lost when the robot moves away.
+  // E_OCC/E_FREE frontiers are kept local (within r_max) since they are only
+  // actionable near the robot and the global set would be very large.
   ros::WallTime t_tpm0 = ros::WallTime::now();
-  std::vector<LeafEntry> raw_leaves =
-      extractLeavesFromIndex(*idx_, robot_pos, params_.r_max);
+  std::vector<LeafEntry> raw_leaves = extractAllLeavesFromIndex(*idx_);
   ros::WallTime t_tpm1 = ros::WallTime::now();
   std::vector<ClassifiedVoxel> all_voxels =
       classifyExtracted(raw_leaves, params_.sigma2_thresh);
   ros::WallTime t_tpm2 = ros::WallTime::now();
-  ROS_WARN("[TPM_TIMING] leaves_in_range=%zu  extract=%.3fs  classify=%.3fs",
+  ROS_WARN("[TPM_TIMING] leaves_total=%zu  extract=%.3fs  classify=%.3fs",
            raw_leaves.size(),
            (t_tpm1 - t_tpm0).toSec(),
            (t_tpm2 - t_tpm1).toSec());
 
-  // Split into U-targets and frontier voxels
+  // Split: U_TARGETs kept globally; frontiers filtered to local r_max
+  const float r_max2 = params_.r_max * params_.r_max;
+  const Eigen::Vector3f rp_f(robot_pos.x(), robot_pos.y(), robot_pos.z());
   std::vector<ClassifiedVoxel> u_voxels, frontier_voxels;
   for (const ClassifiedVoxel& v : all_voxels)
   {
     if (v.type == TargetType::U_TARGET)
       u_voxels.push_back(v);
-    else
+    else if ((v.pos.cast<float>() - rp_f).squaredNorm() <= r_max2)
       frontier_voxels.push_back(v);
   }
 
@@ -132,6 +137,7 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
 
   publishViz(filtered);
   publishClustersViz(clusters, all_frontier_voxels);
+  publishUClustersViz(u_clusters, u_voxels);
   blacklist_.pruneExpired();
 }
 
@@ -182,7 +188,6 @@ aeplanner::TargetList TargetPriorityMap::toROSMsg(
 
 void TargetPriorityMap::publishViz(const std::vector<ScoredTarget>& targets) const
 {
-  if (viz_pub_.getNumSubscribers() == 0) return;
 
   visualization_msgs::MarkerArray ma;
   visualization_msgs::Marker del;
@@ -224,7 +229,6 @@ void TargetPriorityMap::publishClustersViz(
     const std::vector<FrontierCluster>& clusters,
     const std::vector<ClassifiedVoxel>& frontier_voxels) const
 {
-  if (clusters_pub_.getNumSubscribers() == 0) return;
 
   // Simple HSV→RGB for per-cluster colour cycling.
   auto hsvToRgb = [](float h, float& r, float& g, float& b) {
@@ -318,6 +322,88 @@ void TargetPriorityMap::publishClustersViz(
   }
 
   clusters_pub_.publish(ma);
+}
+
+void TargetPriorityMap::publishUClustersViz(
+    const std::vector<FrontierCluster>& u_clusters,
+    const std::vector<ClassifiedVoxel>& u_voxels) const
+{
+  visualization_msgs::MarkerArray ma;
+
+  visualization_msgs::Marker del;
+  del.action = visualization_msgs::Marker::DELETEALL;
+  del.ns = "tpm_u_clusters";
+  ma.markers.push_back(del);
+
+  int id = 0;
+  for (size_t ci = 0; ci < u_clusters.size(); ++ci)
+  {
+    const FrontierCluster& c = u_clusters[ci];
+
+    // Per-cluster hue cycling (golden angle) — shifted toward red/orange
+    float hue = std::fmod(20.0f + (float)ci * 137.508f, 360.0f);
+    float h = hue / 60.0f;
+    float x = 0.9f * (1.0f - std::fabs(std::fmod(h, 2.0f) - 1.0f));
+    float r = 0.1f, g = 0.1f, b = 0.1f;
+    if      (h < 1) { r += 0.9f; g += x; }
+    else if (h < 2) { r += x;    g += 0.9f; }
+    else if (h < 3) { g += 0.9f; b += x; }
+    else if (h < 4) { g += x;    b += 0.9f; }
+    else if (h < 5) { r += x;    b += 0.9f; }
+    else            { r += 0.9f; b += x; }
+
+    // Member voxels as cubes
+    visualization_msgs::Marker cubes;
+    cubes.header.frame_id    = params_.world_frame;
+    cubes.header.stamp       = ros::Time::now();
+    cubes.ns                 = "tpm_u_clusters";
+    cubes.id                 = id++;
+    cubes.type               = visualization_msgs::Marker::CUBE_LIST;
+    cubes.action             = visualization_msgs::Marker::ADD;
+    cubes.scale.x = cubes.scale.y = cubes.scale.z = (float)params_.resolution;
+    cubes.color.r = r; cubes.color.g = g; cubes.color.b = b; cubes.color.a = 0.7f;
+    cubes.lifetime           = ros::Duration(0);
+    cubes.pose.orientation.w = 1.0;
+
+    for (size_t idx : c.member_indices)
+    {
+      geometry_msgs::Point p;
+      p.x = u_voxels[idx].pos.x();
+      p.y = u_voxels[idx].pos.y();
+      p.z = u_voxels[idx].pos.z();
+      cubes.points.push_back(p);
+    }
+    ma.markers.push_back(cubes);
+
+    // Normal arrow (only when reliable)
+    if (c.w_normal >= 0.1f)
+    {
+      visualization_msgs::Marker arrow;
+      arrow.header.frame_id    = params_.world_frame;
+      arrow.header.stamp       = ros::Time::now();
+      arrow.ns                 = "tpm_u_clusters";
+      arrow.id                 = id++;
+      arrow.type               = visualization_msgs::Marker::ARROW;
+      arrow.action             = visualization_msgs::Marker::ADD;
+      arrow.scale.x            = 0.05;
+      arrow.scale.y            = 0.10;
+      arrow.scale.z            = 0.15;
+      arrow.color.r = r; arrow.color.g = g; arrow.color.b = b; arrow.color.a = 1.0f;
+      arrow.lifetime           = ros::Duration(0);
+
+      geometry_msgs::Point p0, p1;
+      p0.x = c.centroid.x(); p0.y = c.centroid.y(); p0.z = c.centroid.z();
+      double len = c.w_normal * 1.5;
+      p1.x = c.centroid.x() + c.normal.x() * len;
+      p1.y = c.centroid.y() + c.normal.y() * len;
+      p1.z = c.centroid.z() + c.normal.z() * len;
+      arrow.points.push_back(p0);
+      arrow.points.push_back(p1);
+      ma.markers.push_back(arrow);
+    }
+  }
+
+  u_clusters_pub_.publish(ma);
 }
 
 }  // namespace aeplanner

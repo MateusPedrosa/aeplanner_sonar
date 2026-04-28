@@ -63,6 +63,7 @@ private:
   ros::Publisher                          targets_pub_;
   ros::Publisher                          viz_pub_;
   ros::Publisher                          clusters_pub_;
+  ros::Publisher                          u_clusters_pub_;
 
   std::shared_ptr<OccupiedUnknownIndex>    idx_;
 
@@ -79,6 +80,8 @@ private:
   void publishViz(const std::vector<ScoredTarget>& targets) const;
   void publishClustersViz(const std::vector<FrontierCluster>& clusters,
                           const std::vector<ClassifiedVoxel>& frontier_voxels) const;
+  void publishUClustersViz(const std::vector<FrontierCluster>& u_clusters,
+                           const std::vector<ClassifiedVoxel>& u_voxels) const;
 };
 
 }  // namespace aeplanner

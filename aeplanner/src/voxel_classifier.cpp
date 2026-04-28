@@ -155,6 +155,28 @@ std::vector<LeafEntry> extractLeavesFromIndex(
   return leaves;
 }
 
+std::vector<LeafEntry> extractAllLeavesFromIndex(const OccupiedUnknownIndex& idx)
+{
+  std::shared_lock<std::shared_mutex> lk(idx.mtx);
+
+  std::vector<LeafEntry> leaves;
+  leaves.reserve(idx.cells.size());
+
+  for (const auto& kv : idx.cells)
+  {
+    const OccupiedUnknownIndex::VoxelData& vd = kv.second;
+    LeafEntry e;
+    e.pos        = vd.pos;
+    e.state      = vd.state;
+    e.var        = vd.var;
+    e.size       = vd.size;
+    e.classified = vd.classified;
+    leaves.push_back(e);
+  }
+
+  return leaves;
+}
+
 std::vector<ClassifiedVoxel> classifyVoxels(
     const std::shared_ptr<la3dm::BGKLOctoMap>& map,
     const Eigen::Vector3d& robot_pos,

@@ -81,6 +81,10 @@ std::vector<LeafEntry> extractLeavesFromIndex(
     const Eigen::Vector3d& robot_pos,
     float r_max);
 
+// Variant with no distance filter — returns all entries in the index.
+// Use when U_TARGETs should be considered globally regardless of robot distance.
+std::vector<LeafEntry> extractAllLeavesFromIndex(const OccupiedUnknownIndex& idx);
+
 // Phase 2: classify leaves using a local spatial hash — no map access, no lock.
 std::vector<ClassifiedVoxel> classifyExtracted(
     const std::vector<LeafEntry>& leaves,
