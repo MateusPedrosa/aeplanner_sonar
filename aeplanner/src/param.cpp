@@ -272,6 +272,28 @@ namespace aeplanner
       ROS_WARN_STREAM("No viewplanner/dwell_arrival_thresh specified. Default: " << params.dwell_arrival_thresh);
     }
 
+    // --- Exploration gain parameters ---
+    params.n_explore_rays_az = 15;
+    if (!ros::param::get(ns + "/viewplanner/n_explore_rays_az", params.n_explore_rays_az)) {
+      ROS_WARN_STREAM("No viewplanner/n_explore_rays_az specified. Default: " << params.n_explore_rays_az);
+    }
+    params.n_explore_rays_el = 4;
+    if (!ros::param::get(ns + "/viewplanner/n_explore_rays_el", params.n_explore_rays_el)) {
+      ROS_WARN_STREAM("No viewplanner/n_explore_rays_el specified. Default: " << params.n_explore_rays_el);
+    }
+    params.w_unknown = 1.0;
+    if (!ros::param::get(ns + "/viewplanner/w_unknown", params.w_unknown)) {
+      ROS_WARN_STREAM("No viewplanner/w_unknown specified. Default: " << params.w_unknown);
+    }
+    params.w_cubature_explore = 0.1;
+    if (!ros::param::get(ns + "/viewplanner/w_cubature_explore", params.w_cubature_explore)) {
+      ROS_WARN_STREAM("No viewplanner/w_cubature_explore specified. Default: " << params.w_cubature_explore);
+    }
+    params.min_explore_gain = 5.0;
+    if (!ros::param::get(ns + "/viewplanner/min_explore_gain", params.min_explore_gain)) {
+      ROS_WARN_STREAM("No viewplanner/min_explore_gain specified. Default: " << params.min_explore_gain);
+    }
+
     return params;
   }
 }

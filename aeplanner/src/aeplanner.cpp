@@ -501,6 +501,312 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     succeed("RESOLVE_STEP"); return;
   }
 
+  // ── EXPLORE: committed navigation to best E-target viewpoint ─────────────
+  if (planner_state == PlannerState::EXPLORE)
+  {
+    // Clear stale commitment when re-entering from any other state.
+    if (prev_planner_state_ != PlannerState::EXPLORE)
+    {
+      has_committed_explore_viewpoint_ = false;
+      explore_waypoints_.clear();
+      explore_wp_idx_ = 0;
+    }
+
+    // Try to commit to a new viewpoint if we don't have one.
+    if (!has_committed_explore_viewpoint_)
+    {
+      // Collect E_OCC / E_FREE targets in priority order (tpm_targets is sorted).
+      std::vector<const ScoredTarget*> e_targets;
+      for (const auto& t : tpm_targets)
+        if (t.type == TargetType::E_OCC || t.type == TargetType::E_FREE)
+          e_targets.push_back(&t);
+
+      if (!e_targets.empty())
+      {
+        const ScoredTarget& top = *e_targets[0];
+
+        DirectedSampler* sampler =
+            (top.type == TargetType::E_FREE &&
+             top.w_normal < params_.w_normal_thresh)
+            ? static_cast<DirectedSampler*>(frontier_sampler_.get())
+            : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
+
+        auto candidates = sampler->sampleCandidates(top, current_state_, ot_, params_);
+
+        priority_cache_valid_ = false;
+        computePriorityCache();
+
+        double best_score = -1.0;
+        std::vector<std::pair<Eigen::Vector4d, double>> scored_candidates;
+        for (const CandidatePose& cp : candidates)
+        {
+          if (!isInsideBoundaries(cp.state)) continue;
+          if (planning_snapshot_.occupied(
+                  static_cast<float>(cp.state[0]),
+                  static_cast<float>(cp.state[1]),
+                  static_cast<float>(cp.state[2]))) continue;
+          double dist  = (cp.state.head<3>() - current_state_.head<3>()).norm();
+          double score = gainExploration(cp.state) * std::exp(-params_.lambda_dist * dist);
+          scored_candidates.push_back({cp.state, score});
+          if (score > best_score)
+          {
+            best_score                   = score;
+            committed_explore_viewpoint_ = cp.state;
+          }
+        }
+
+        if (best_score >= params_.min_explore_gain)
+        {
+          committed_explore_target_          = top;
+          has_committed_explore_viewpoint_   = true;
+          explore_waypoints_.clear();
+          explore_wp_idx_ = 0;
+          ROS_INFO_STREAM("[EXPLORE] Committed viewpoint ("
+            << committed_explore_viewpoint_[0] << ", "
+            << committed_explore_viewpoint_[1] << ", "
+            << committed_explore_viewpoint_[2] << ") yaw="
+            << (committed_explore_viewpoint_[3] * 180.0 / M_PI) << " deg"
+            << "  score=" << best_score);
+
+          // Publish candidates + committed viewpoint
+          {
+            visualization_msgs::MarkerArray viz;
+
+            visualization_msgs::Marker del;
+            del.action = visualization_msgs::Marker::DELETEALL;
+            viz.markers.push_back(del);
+
+            int cand_id = 0;
+            for (const auto& [state, score] : scored_candidates)
+            {
+              visualization_msgs::Marker m;
+              m.header.stamp    = ros::Time::now();
+              m.header.frame_id = params_.world_frame;
+              m.ns = "explore_candidates"; m.id = cand_id++;
+              m.type   = visualization_msgs::Marker::ARROW;
+              m.action = visualization_msgs::Marker::ADD;
+              m.pose.position.x = state[0];
+              m.pose.position.y = state[1];
+              m.pose.position.z = state[2];
+              tf::Quaternion cq; cq.setEuler(0.0, 0.0, state[3]);
+              m.pose.orientation.x = cq.x(); m.pose.orientation.y = cq.y();
+              m.pose.orientation.z = cq.z(); m.pose.orientation.w = cq.w();
+              double rel = (best_score > 0) ? score / best_score : 0.0;
+              m.scale.x = std::max(rel * 1.5, 0.1);
+              m.scale.y = 0.12; m.scale.z = 0.12;
+              m.color.r = 0.5; m.color.g = 0.8; m.color.b = 1.0; m.color.a = 0.8;
+              m.lifetime = ros::Duration(30.0);
+              viz.markers.push_back(m);
+            }
+
+            // Committed viewpoint — blue arrow
+            {
+              visualization_msgs::Marker m;
+              m.header.stamp    = ros::Time::now();
+              m.header.frame_id = params_.world_frame;
+              m.ns = "explore_committed"; m.id = 0;
+              m.type   = visualization_msgs::Marker::ARROW;
+              m.action = visualization_msgs::Marker::ADD;
+              m.pose.position.x = committed_explore_viewpoint_[0];
+              m.pose.position.y = committed_explore_viewpoint_[1];
+              m.pose.position.z = committed_explore_viewpoint_[2];
+              tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_explore_viewpoint_[3]);
+              m.pose.orientation.x = vq.x(); m.pose.orientation.y = vq.y();
+              m.pose.orientation.z = vq.z(); m.pose.orientation.w = vq.w();
+              m.scale.x = 2.0; m.scale.y = 0.3; m.scale.z = 0.3;
+              m.color.r = 0.0; m.color.g = 0.5; m.color.b = 1.0; m.color.a = 1.0;
+              m.lifetime = ros::Duration(0);
+              viz.markers.push_back(m);
+            }
+
+            // Committed E-target — cyan sphere
+            {
+              visualization_msgs::Marker m;
+              m.header.stamp    = ros::Time::now();
+              m.header.frame_id = params_.world_frame;
+              m.ns = "explore_target"; m.id = 0;
+              m.type   = visualization_msgs::Marker::SPHERE;
+              m.action = visualization_msgs::Marker::ADD;
+              m.pose.position.x = committed_explore_target_.pos.x();
+              m.pose.position.y = committed_explore_target_.pos.y();
+              m.pose.position.z = committed_explore_target_.pos.z();
+              m.pose.orientation.w = 1.0;
+              m.scale.x = m.scale.y = m.scale.z = 0.8;
+              m.color.r = 0.0; m.color.g = 1.0; m.color.b = 1.0; m.color.a = 1.0;
+              m.lifetime = ros::Duration(0);
+              viz.markers.push_back(m);
+            }
+
+            rrt_marker_pub_.publish(viz);
+          }
+        }
+        else
+        {
+          ROS_INFO_STREAM("[EXPLORE] Best score " << best_score
+            << " < min_explore_gain " << params_.min_explore_gain
+            << "; falling back to RRT.");
+        }
+      }
+    }
+
+    // Follow the planned path to the committed viewpoint.
+    if (has_committed_explore_viewpoint_)
+    {
+      // Plan a path if we don't have one yet.
+      if (explore_waypoints_.empty())
+      {
+        explore_waypoints_ = planPathToGoal(committed_explore_viewpoint_);
+        explore_wp_idx_    = 0;
+
+        if (explore_waypoints_.empty())
+        {
+          ROS_WARN("[EXPLORE] planPathToGoal failed; falling back to RRT.");
+          has_committed_explore_viewpoint_ = false;
+          // Fall through to RRT below.
+        }
+        else
+        {
+          // Publish the planned path as a LINE_STRIP
+          {
+            visualization_msgs::MarkerArray viz;
+            visualization_msgs::Marker path_m;
+            path_m.header.stamp    = ros::Time::now();
+            path_m.header.frame_id = params_.world_frame;
+            path_m.ns = "explore_path"; path_m.id = 0;
+            path_m.type   = visualization_msgs::Marker::LINE_STRIP;
+            path_m.action = visualization_msgs::Marker::ADD;
+            geometry_msgs::Point p0;
+            p0.x = current_state_[0]; p0.y = current_state_[1]; p0.z = current_state_[2];
+            path_m.points.push_back(p0);
+            for (const auto& wp : explore_waypoints_)
+            {
+              geometry_msgs::Point p;
+              p.x = wp[0]; p.y = wp[1]; p.z = wp[2];
+              path_m.points.push_back(p);
+            }
+            path_m.scale.x = 0.08;
+            path_m.color.r = 0.0; path_m.color.g = 0.7;
+            path_m.color.b = 1.0; path_m.color.a = 0.9;
+            path_m.lifetime = ros::Duration(0);
+            viz.markers.push_back(path_m);
+            rrt_marker_pub_.publish(viz);
+          }
+        }
+      }
+
+      // If we have a valid path, step along it.
+      if (!explore_waypoints_.empty())
+      {
+        // Arrival at current waypoint?
+        double dist_to_wp =
+            (current_state_.head<3>() - explore_waypoints_[explore_wp_idx_].head<3>()).norm();
+        if (dist_to_wp < params_.dwell_arrival_thresh)
+        {
+          ++explore_wp_idx_;
+          if (explore_wp_idx_ >= (int)explore_waypoints_.size())
+          {
+            ROS_INFO("[EXPLORE] Arrived at viewpoint. Re-evaluating.");
+            has_committed_explore_viewpoint_ = false;
+            explore_waypoints_.clear();
+            explore_wp_idx_ = 0;
+            result.is_clear             = true;
+            result.pose.pose            = vecToPose(current_state_);
+            result.pose.header.stamp    = ros::Time::now();
+            result.pose.header.frame_id = params_.world_frame;
+            prev_planner_state_ = PlannerState::EXPLORE;
+            succeed("EXPLORE_ARRIVED"); return;
+          }
+        }
+
+        // Validate remaining path segments.
+        {
+          bool path_blocked = false;
+          for (int k = explore_wp_idx_; k < (int)explore_waypoints_.size(); ++k)
+          {
+            const Eigen::Vector4d& from = (k == explore_wp_idx_)
+                                          ? current_state_
+                                          : explore_waypoints_[k - 1];
+            if (collisionLine(from, explore_waypoints_[k], params_.bounding_radius))
+            {
+              ROS_WARN("[EXPLORE] Path segment %d blocked; re-planning.", k);
+              path_blocked = true;
+              break;
+            }
+          }
+          if (path_blocked)
+          {
+            explore_waypoints_.clear();
+            explore_wp_idx_ = 0;
+            result.is_clear             = true;
+            result.pose.pose            = vecToPose(current_state_);
+            result.pose.header.stamp    = ros::Time::now();
+            result.pose.header.frame_id = params_.world_frame;
+            prev_planner_state_ = PlannerState::EXPLORE;
+            succeed("EXPLORE_PATH_BLOCKED"); return;
+          }
+        }
+
+        // Step toward the current waypoint.
+        const Eigen::Vector4d& wp = explore_waypoints_[explore_wp_idx_];
+        Eigen::Vector3d diff   = wp.head<3>() - current_state_.head<3>();
+        double remaining       = diff.norm();
+        Eigen::Vector3d dir    = diff / remaining;
+        double step            = std::min(params_.extension_range, remaining);
+
+        Eigen::Vector4d next_pose;
+        next_pose.head<3>() = current_state_.head<3>() + step * dir;
+        next_pose[3]        = wp[3];
+
+        // Refresh committed viewpoint + target markers.
+        {
+          visualization_msgs::MarkerArray viz;
+
+          visualization_msgs::Marker vp;
+          vp.header.stamp    = ros::Time::now();
+          vp.header.frame_id = params_.world_frame;
+          vp.ns = "explore_committed"; vp.id = 0;
+          vp.type   = visualization_msgs::Marker::ARROW;
+          vp.action = visualization_msgs::Marker::ADD;
+          vp.pose.position.x = committed_explore_viewpoint_[0];
+          vp.pose.position.y = committed_explore_viewpoint_[1];
+          vp.pose.position.z = committed_explore_viewpoint_[2];
+          tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_explore_viewpoint_[3]);
+          vp.pose.orientation.x = vq.x(); vp.pose.orientation.y = vq.y();
+          vp.pose.orientation.z = vq.z(); vp.pose.orientation.w = vq.w();
+          vp.scale.x = 2.0; vp.scale.y = 0.3; vp.scale.z = 0.3;
+          vp.color.r = 0.0; vp.color.g = 0.5; vp.color.b = 1.0; vp.color.a = 1.0;
+          vp.lifetime = ros::Duration(0);
+          viz.markers.push_back(vp);
+
+          visualization_msgs::Marker tgt;
+          tgt.header.stamp    = ros::Time::now();
+          tgt.header.frame_id = params_.world_frame;
+          tgt.ns = "explore_target"; tgt.id = 0;
+          tgt.type   = visualization_msgs::Marker::SPHERE;
+          tgt.action = visualization_msgs::Marker::ADD;
+          tgt.pose.position.x = committed_explore_target_.pos.x();
+          tgt.pose.position.y = committed_explore_target_.pos.y();
+          tgt.pose.position.z = committed_explore_target_.pos.z();
+          tgt.pose.orientation.w = 1.0;
+          tgt.scale.x = tgt.scale.y = tgt.scale.z = 0.8;
+          tgt.color.r = 0.0; tgt.color.g = 1.0; tgt.color.b = 1.0; tgt.color.a = 1.0;
+          tgt.lifetime = ros::Duration(0);
+          viz.markers.push_back(tgt);
+
+          rrt_marker_pub_.publish(viz);
+        }
+
+        result.is_clear             = true;
+        result.pose.pose            = vecToPose(next_pose);
+        result.pose.header.stamp    = ros::Time::now();
+        result.pose.header.frame_id = params_.world_frame;
+        prev_planner_state_ = PlannerState::EXPLORE;
+        succeed("EXPLORE_STEP"); return;
+      }
+    }
+    // No committed path — fall through to RRT expansion.
+  }
+
   prev_planner_state_ = planner_state;
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -1148,6 +1454,79 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
   ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2]
                    << ") yaw=" << (state[3] * 180.0 / M_PI) << " deg  score: " << score);
   return std::make_pair(score, state[3]);
+}
+
+double AEPlanner::gainExploration(const Eigen::Vector4d& state)
+{
+  // Set up sensor pose — same TF lookup as gainCubature.
+  tf::Vector3 base_origin(state[0], state[1], state[2]);
+  tf::StampedTransform base_to_sensor;
+  try {
+    tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame,
+                                 ros::Time(0), base_to_sensor);
+  } catch (tf::TransformException& ex) {
+    ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor at base_link.", ex.what());
+    base_to_sensor.setIdentity();
+  }
+
+  const double hfov_rad = params_.hfov * M_PI / 180.0;
+  const double vfov_rad = params_.vfov * M_PI / 180.0;
+  const double r_max    = params_.r_max;
+  const double r_min    = params_.r_min;
+  const float  snap_res = planning_snapshot_.resolution;
+
+  tf::Quaternion base_quat;
+  base_quat.setEuler(0.0, 0.0, state[3]);
+  tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * base_to_sensor;
+
+  Eigen::Vector3d t_sensor(sensor_pose_in_world.getOrigin().x(),
+                            sensor_pose_in_world.getOrigin().y(),
+                            sensor_pose_in_world.getOrigin().z());
+  tf::Matrix3x3 sensor_rot = sensor_pose_in_world.getBasis();
+
+  // Cast a uniform azimuth × elevation grid of rays through the FOV.
+  // For each ray, march from r_min to r_max and count UNKNOWN voxels.
+  // Hold shared_lock for the whole pass — bounded to N_az * N_el * (r_max/snap_res) lookups.
+  int n_unknown = 0;
+  {
+    std::shared_lock<std::shared_mutex> lk(ot_mutex_);
+    const int N_az = std::max(1, params_.n_explore_rays_az);
+    const int N_el = std::max(1, params_.n_explore_rays_el);
+
+    for (int ia = 0; ia < N_az; ++ia)
+    for (int ie = 0; ie < N_el; ++ie)
+    {
+      double az = (N_az > 1) ? hfov_rad * (ia / (N_az - 1.0) - 0.5) : 0.0;
+      double el = (N_el > 1) ? vfov_rad * (ie / (N_el - 1.0) - 0.5) : 0.0;
+
+      // Ray direction in sensor frame, rotated to world frame.
+      tf::Vector3 d_world_tf = sensor_rot * tf::Vector3(
+          std::cos(el) * std::cos(az),
+          std::cos(el) * std::sin(az),
+          std::sin(el));
+      Eigen::Vector3d ray_dir(d_world_tf.x(), d_world_tf.y(), d_world_tf.z());
+
+      for (double range = r_min; range <= r_max; range += snap_res)
+      {
+        Eigen::Vector3d pt = t_sensor + range * ray_dir;
+        float px = static_cast<float>(pt.x());
+        float py = static_cast<float>(pt.y());
+        float pz = static_cast<float>(pt.z());
+
+        // Occupied voxel blocks the ray.
+        if (planning_snapshot_.occupied(px, py, pz)) break;
+
+        if (ot_->search(px, py, pz).get_state() == la3dm::State::UNKNOWN)
+          ++n_unknown;
+      }
+    }
+  }
+
+  // Cubature component (lock-free — uses priority_cache_).
+  double cub_score = gainCubature(state).first;
+
+  return params_.w_unknown * static_cast<double>(n_unknown)
+       + params_.w_cubature_explore * cub_score;
 }
 
 geometry_msgs::PoseArray AEPlanner::getFrontiers()

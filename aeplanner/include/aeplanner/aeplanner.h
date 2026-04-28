@@ -159,6 +159,14 @@ private:
   std::vector<Eigen::Vector4d> resolve_waypoints_;
   int                          resolve_wp_idx_ = 0;
 
+  // Committed viewpoint for EXPLORE state — mirrors RESOLVE variables.
+  // No DWELL on arrival; re-evaluates immediately next tick.
+  bool                         has_committed_explore_viewpoint_ = false;
+  Eigen::Vector4d              committed_explore_viewpoint_;
+  ScoredTarget                 committed_explore_target_;
+  std::vector<Eigen::Vector4d> explore_waypoints_;
+  int                          explore_wp_idx_ = 0;
+
   // kd tree for finding nearest neighbours
   kdtree* kd_tree_;
 
@@ -203,6 +211,7 @@ private:
 
   std::pair<double, double> getGain(RRTNode* node);
   std::pair<double, double> gainCubature(Eigen::Vector4d state);
+  double gainExploration(const Eigen::Vector4d& state);
 
   std::vector<Eigen::Vector4d> planPathToGoal(const Eigen::Vector4d& goal);
 

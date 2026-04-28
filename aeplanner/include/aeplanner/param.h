@@ -85,6 +85,13 @@ namespace aeplanner
     float  w_normal_thresh;     // min PCA anisotropy for reliable frontier normal (default 0.4)
     double tpm_rate;            // TPM update rate in Hz (default 2.0)
     double dwell_arrival_thresh; // dist to committed viewpoint that triggers DWELL entry (default 1.0)
+
+    // --- Exploration gain parameters ---
+    int    n_explore_rays_az;     // azimuth ray count for gainExploration (default 15)
+    int    n_explore_rays_el;     // elevation ray count for gainExploration (default 4)
+    double w_unknown;             // weight for UNKNOWN voxel count in explore score (default 1.0)
+    double w_cubature_explore;    // weight for gainCubature component in explore score (default 0.1)
+    double min_explore_gain;      // min explore score to commit; fallback to RRT if lower (default 5.0)
   };
 
   Params readParams();
