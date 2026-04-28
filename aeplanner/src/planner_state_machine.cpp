@@ -9,12 +9,11 @@ const char* plannerStateToString(PlannerState s)
 {
   switch (s)
   {
-    case PlannerState::EXPLORE:    return "EXPLORE";
-    case PlannerState::RESOLVE:    return "RESOLVE";
-    case PlannerState::DWELL:      return "DWELL";
-    case PlannerState::REPOSITION: return "REPOSITION";
-    case PlannerState::DONE:       return "DONE";
-    default:                       return "UNKNOWN";
+    case PlannerState::EXPLORE: return "EXPLORE";
+    case PlannerState::RESOLVE: return "RESOLVE";
+    case PlannerState::DWELL:   return "DWELL";
+    case PlannerState::DONE:    return "DONE";
+    default:                    return "UNKNOWN";
   }
 }
 
@@ -27,33 +26,28 @@ PlannerState PlannerStateMachine::tick(
 
   if (targets.empty()) return PlannerState::DONE;
 
-  const double local_r2 = params.local_radius * params.local_radius;
-  Eigen::Vector3d robot_pos = robot_state.head<3>();
-
-  // Find best U-target and best E-target in local volume
-  float best_u_priority = -1.0f;
-  float best_e_priority = -1.0f;
+  // Consider ALL targets globally — EXPLORE/RESOLVE handle any distance
+  // via planPathToGoal. No local_radius filtering; no REPOSITION state.
+  float best_u = -1.0f;
+  float best_e = -1.0f;
 
   for (const ScoredTarget& t : targets)
   {
-    bool local = (t.pos - robot_pos).squaredNorm() <= local_r2;
-    if (!local) continue;
     if (t.type == TargetType::U_TARGET)
-      best_u_priority = std::max(best_u_priority, t.priority);
+      best_u = std::max(best_u, t.priority);
     else
-      best_e_priority = std::max(best_e_priority, t.priority);
+      best_e = std::max(best_e, t.priority);
   }
 
-  if (best_u_priority > 0.0f &&
-      best_u_priority > best_e_priority * params.alpha_bias)
+  if (best_u > 0.0f && best_u > best_e * params.alpha_bias)
     return PlannerState::RESOLVE;
 
-  if (best_e_priority > 0.0f)
+  if (best_e > 0.0f)
     return PlannerState::EXPLORE;
 
-  // No local targets — check if any global targets exist
-  if (!targets.empty())
-    return PlannerState::REPOSITION;
+  // Only U_TARGETs with lower priority than E-targets, or only U_TARGETs
+  if (best_u > 0.0f)
+    return PlannerState::RESOLVE;
 
   return PlannerState::DONE;
 }

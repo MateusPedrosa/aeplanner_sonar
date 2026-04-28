@@ -75,8 +75,6 @@ set(AEPLANNER_SOURCES
   src/pose_scorer.cpp
   src/planner_state_machine.cpp
   src/dwell_controller.cpp
-  src/global_target_selector.cpp
-  src/reachability_checker.cpp
 )
 
 add_library(aeplanner ${AEPLANNER_SOURCES})
@@ -105,8 +103,6 @@ set(AEPLANNER_NODE_SOURCES
   src/pose_scorer.cpp
   src/planner_state_machine.cpp
   src/dwell_controller.cpp
-  src/global_target_selector.cpp
-  src/reachability_checker.cpp
 )
 
 add_executable(aeplanner_node ${AEPLANNER_NODE_SOURCES})

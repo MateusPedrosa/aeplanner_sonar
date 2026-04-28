@@ -33,10 +33,6 @@
 #include <aeplanner/aeplannerAction.h>
 #include <actionlib/server/simple_action_server.h>
 
-#include <pigain/Node.h>
-#include <pigain/Query.h>
-#include <pigain/BestNode.h>
-
 #include <dynamic_reconfigure/server.h>
 #include <nav_msgs/Path.h>
 
@@ -46,8 +42,6 @@
 #include <aeplanner/frontier_sampler.h>
 #include <aeplanner/planner_state_machine.h>
 #include <aeplanner/dwell_controller.h>
-#include <aeplanner/global_target_selector.h>
-#include <aeplanner/reachability_checker.h>
 #include <std_msgs/String.h>
 
 namespace aeplanner
@@ -105,10 +99,6 @@ private:
   Eigen::Vector4d current_state_;
   bool current_state_initialized_;
 
-  // Keep track of the best node and its score
-  RRTNode* best_node_;
-  RRTNode* best_branch_root_;
-
   std::shared_ptr<la3dm::BGKLOctoMap> ot_;
   // Reader-writer lock for ot_:
   //   cloudCallback (insert_pointcloud)  → unique_lock (exclusive write)
@@ -143,10 +133,6 @@ private:
   std::unique_ptr<PlannerStateMachine> state_machine_;
   std::unique_ptr<DwellController>     dwell_controller_;
 
-  // Override target for REPOSITION state (Phase 4); empty optional = use TPM top
-  bool          has_reposition_target_ = false;
-  ScoredTarget  reposition_target_;
-
   // Committed viewpoint for RESOLVE state — selected once per episode,
   // then followed step-by-step until arrival triggers DWELL.
   bool            has_committed_viewpoint_ = false;
@@ -167,16 +153,12 @@ private:
   std::vector<Eigen::Vector4d> explore_waypoints_;
   int                          explore_wp_idx_ = 0;
 
-  // kd tree for finding nearest neighbours
-  kdtree* kd_tree_;
-
   // Subscribers
   ros::Subscriber point_sub_;
   ros::Subscriber agent_pose_sub_;
 
   // Publishers
   ros::Publisher rrt_marker_pub_;
-  ros::Publisher gain_pub_;
   ros::Publisher bbx_marker_pub_;
   ros::Publisher viewpoints_pub_;
 
@@ -187,20 +169,11 @@ private:
   tf::TransformListener tf_listener_;
 
   // Services
-  ros::ServiceClient best_node_client_;
   ros::ServiceServer reevaluate_server_;
 
   // Service server callback
   bool reevaluate(aeplanner::Reevaluate::Request& req,
                   aeplanner::Reevaluate::Response& res);
-
-  // ---------------- Initialization ----------------
-  RRTNode* initialize();
-  void initializeKDTreeWithPreviousBestBranch(RRTNode* root);
-  void reevaluatePotentialInformationGainRecursive(RRTNode* node);
-
-  // ---------------- Expand RRT Tree ----------------
-  void expandRRT();
 
   Eigen::Vector4d sampleNewPoint();
   bool isInsideBoundaries(Eigen::Vector4d point);
@@ -209,7 +182,6 @@ private:
   void rewire(kdtree* kd_tree, RRTNode* new_node, double l, double r, double r_os);
   Eigen::Vector4d restrictDistance(Eigen::Vector4d nearest, Eigen::Vector4d new_pos);
 
-  std::pair<double, double> getGain(RRTNode* node);
   std::pair<double, double> gainCubature(Eigen::Vector4d state);
   double gainExploration(const Eigen::Vector4d& state);
 
@@ -226,8 +198,8 @@ private:
   std::vector<Eigen::Vector3f> pending_occupied_points_;
   std::mutex                   pending_mutex_;
 
-  // Priority voxel cache — computed once per planning cycle (expandRRT call)
-  // so that the expensive map iteration in Step 1 is not repeated per RRT node.
+  // Priority voxel cache — computed once per planning cycle so that the
+  // expensive map iteration is not repeated per candidate viewpoint.
   struct PriorityVoxel {
     Eigen::Vector3d pos;
     float           priority;
@@ -239,14 +211,10 @@ private:
   void computePriorityCache();
 
   // ---------------- Helpers ----------------
-  void publishEvaluatedNodesRecursive(RRTNode* node);
   geometry_msgs::Pose vecToPose(Eigen::Vector4d state);
 
   float CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2,
                           float lsq, float rsq, const octomap::point3d& pt);
-
-  // ---------------- Frontier ----------------
-  geometry_msgs::PoseArray getFrontiers();
 
 public:
   AEPlanner(const ros::NodeHandle& nh);

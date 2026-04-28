@@ -14,7 +14,6 @@ enum class PlannerState
   EXPLORE,
   RESOLVE,
   DWELL,
-  REPOSITION,
   DONE
 };
 

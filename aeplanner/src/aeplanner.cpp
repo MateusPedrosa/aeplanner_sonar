@@ -9,15 +9,11 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   , point_sub_(nh_.subscribe("pointcloud", 1, &AEPlanner::cloudCallback, this))
   , agent_pose_sub_(nh_.subscribe("agent_pose", 1, &AEPlanner::agentPoseCallback, this))
   , rrt_marker_pub_(nh_.advertise<visualization_msgs::MarkerArray>("rrtree", 1000))
-  , gain_pub_(nh_.advertise<pigain::Node>("gain_node", 1000))
   , bbx_marker_pub_(nh_.advertise<visualization_msgs::Marker>("bbx", 1000, true)) // Latched
   , viewpoints_pub_(nh_.advertise<geometry_msgs::PoseArray>("sonar_viewpoints", 1, true)) // Latched
   , reevaluate_server_(nh_.advertiseService("reevaluate", &AEPlanner::reevaluate, this))
-  , best_node_client_(nh_.serviceClient<pigain::BestNode>("best_node_server"))
   , current_state_initialized_(false)
   , ot_(NULL)
-  , best_node_(NULL)
-  , best_branch_root_(NULL)
 {
   params_ = readParams();
   as_.start();
@@ -33,8 +29,6 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   m_pub_unc_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/uncertain_cells_vis_array", params_.resolution);
   // m_pub_unk_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/unknown_cells_vis_array", params_.resolution);
   m_pub_var_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/variance_vis_array", params_.resolution);
-  // Initialize kd-tree
-  kd_tree_ = kd_create(3);
 
   double viz_period = (params_.viz_rate > 0.0) ? (1.0 / params_.viz_rate) : 0.5;
   viz_timer_ = nh_.createTimer(ros::Duration(viz_period), &AEPlanner::publishMapViz, this);
@@ -109,7 +103,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     pending_occupied_points_.clear();
   }
 
-  // State machine tick — determines EXPLORE/RESOLVE/DWELL/REPOSITION/DONE
+  // State machine tick — determines EXPLORE/RESOLVE/DWELL/DONE
   std::vector<ScoredTarget> tpm_targets;
   if (tpm_) tpm_targets = tpm_->getTargets();
 
@@ -162,31 +156,6 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     succeed("DONE"); return;
   }
 
-  // REPOSITION: select a global target to bias sampling toward
-  has_reposition_target_ = false;
-  if (planner_state == PlannerState::REPOSITION && !tpm_targets.empty())
-  {
-    const ScoredTarget* global =
-        selectGlobalTarget(tpm_targets, current_state_.head<3>(), params_.local_radius);
-    if (global)
-    {
-      std::shared_lock<std::shared_mutex> map_lk(ot_mutex_);
-      bool reachable = isLikelyReachable(
-          current_state_.head<3>(), global->pos, ot_);
-      map_lk.unlock();
-
-      if (reachable)
-      {
-        reposition_target_     = *global;
-        has_reposition_target_ = true;
-        ROS_INFO_STREAM("[REPOSITION] Global target at ("
-                        << global->pos.x() << ", "
-                        << global->pos.y() << ", "
-                        << global->pos.z() << ") priority=" << global->priority);
-      }
-    }
-  }
-
   // ── RESOLVE: committed navigation to best viewpoint ──────────────────────
   // Select the best candidate once, then step toward it with forward-facing
   // yaw. DWELL is entered only when the robot arrives (dist < dwell_arrival_thresh)
@@ -208,8 +177,11 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     {
       if (tpm_targets.empty())
       {
-        result.is_clear = false;
-        succeed("RESOLVE_NO_TARGETS"); return;
+        result.is_clear             = true;
+        result.pose.pose            = vecToPose(current_state_);
+        result.pose.header.stamp    = ros::Time::now();
+        result.pose.header.frame_id = params_.world_frame;
+        succeed("RESOLVE_HOLD"); return;
       }
 
       const ScoredTarget& top = tpm_targets[0];
@@ -249,10 +221,12 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
       if (best_score <= 0.0)
       {
-        ROS_WARN("[RESOLVE] No valid candidate viewpoint found; deferring.");
-        result.is_clear    = false;
-        result.frontiers   = getFrontiers();
-        succeed("RESOLVE_NO_CANDIDATES"); return;
+        ROS_WARN("[RESOLVE] No valid candidate viewpoint found; holding position.");
+        result.is_clear             = true;
+        result.pose.pose            = vecToPose(current_state_);
+        result.pose.header.stamp    = ros::Time::now();
+        result.pose.header.frame_id = params_.world_frame;
+        succeed("RESOLVE_HOLD_NO_CAND"); return;
       }
 
       committed_target_        = top;
@@ -351,9 +325,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       {
         ROS_WARN("[RESOLVE] planPathToGoal failed; re-selecting viewpoint next iteration.");
         has_committed_viewpoint_ = false;
-        // Hold current position — do NOT fall back to getFrontiers() from inside
-        // RESOLVE, as pigain has no nodes and would return 0 frontiers, causing
-        // rpl_exploration to declare exploration complete prematurely.
+        // Hold current position and re-evaluate next tick.
         result.is_clear             = true;
         result.pose.pose            = vecToPose(current_state_);
         result.pose.header.stamp    = ros::Time::now();
@@ -433,9 +405,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       {
         resolve_waypoints_.clear();
         resolve_wp_idx_ = 0;
-        // Hold current position — getFrontiers() returns 0 nodes during RESOLVE
-        // (pigain only populated from EXPLORE/REPOSITION), which would cause
-        // rpl_exploration to declare exploration complete prematurely.
+        // Hold current position and re-plan next tick.
         result.is_clear             = true;
         result.pose.pose            = vecToPose(current_state_);
         result.pose.header.stamp    = ros::Time::now();
@@ -640,11 +610,17 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
             rrt_marker_pub_.publish(viz);
           }
         }
+        else if (best_score < 0.0)
+        {
+          // No geometrically valid candidate at all — record failure so the
+          // blacklist eventually removes this target if it stays unreachable.
+          ROS_WARN("[EXPLORE] No valid candidate for E-target; recording failure.");
+          if (tpm_) tpm_->recordFailure(top.pos);
+        }
         else
         {
           ROS_INFO_STREAM("[EXPLORE] Best score " << best_score
-            << " < min_explore_gain " << params_.min_explore_gain
-            << "; falling back to RRT.");
+            << " below min_explore_gain " << params_.min_explore_gain << "; holding.");
         }
       }
     }
@@ -660,9 +636,9 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
         if (explore_waypoints_.empty())
         {
-          ROS_WARN("[EXPLORE] planPathToGoal failed; falling back to RRT.");
+          ROS_WARN("[EXPLORE] planPathToGoal failed; recording failure.");
+          if (tpm_) tpm_->recordFailure(committed_explore_target_.pos);
           has_committed_explore_viewpoint_ = false;
-          // Fall through to RRT below.
         }
         else
         {
@@ -804,263 +780,21 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         succeed("EXPLORE_STEP"); return;
       }
     }
-    // No committed path — fall through to RRT expansion.
+    // No committed path — hold position and re-evaluate next tick.
+    result.is_clear             = true;
+    result.pose.pose            = vecToPose(current_state_);
+    result.pose.header.stamp    = ros::Time::now();
+    result.pose.header.frame_id = params_.world_frame;
+    prev_planner_state_         = PlannerState::EXPLORE;
+    succeed("EXPLORE_HOLD"); return;
   }
 
-  prev_planner_state_ = planner_state;
-  // ─────────────────────────────────────────────────────────────────────────
-
-  ROS_DEBUG("Init");
-  RRTNode* root = initialize();
-  ROS_DEBUG("expandRRT");
-  if (root->gain_ > 0.25 or !root->children_.size() or // FIXME parameterize
-      root->score(params_.lambda) < params_.zero_gain)
-    expandRRT();
-  else
-    best_node_ = root->children_[0];
-
-  // expandRRT can exhaust its sampling budget without finding any feasible
-  // node (e.g. when the map is still mostly UNKNOWN right after the init
-  // motion). Return a non-clear result with frontiers so rpl_exploration can
-  // fall back to the RRT-to-frontiers branch instead of the action hanging.
-  if (!best_node_)
-  {
-    ROS_WARN("expandRRT returned no feasible node; reporting non-clear result so driver can re-route.");
-    result.is_clear = false;
-    result.frontiers = getFrontiers();
-    succeed("EXPLORE_NO_NODE");
-    delete root;
-    kd_free(kd_tree_);
-    return;
-  }
-
-  ROS_DEBUG("getCopyOfParent");
-  best_branch_root_ = best_node_->getCopyOfParentBranch();
-
-  ROS_DEBUG("createRRTMarker");
-  rrt_marker_pub_.publish(createRRTMarkerArray(root, params_.lambda));
-  
-  // Publish bounding box
-  bbx_marker_pub_.publish(createBoundingBoxMarker(params_.boundary_min, params_.boundary_max, 0, params_.world_frame));
-
-  ROS_DEBUG("publishRecursive");
-  publishEvaluatedNodesRecursive(root);
-
-  ROS_DEBUG("extractPose");
-  result.pose.pose = vecToPose(best_branch_root_->children_[0]->state_);
-  ROS_INFO_STREAM("Best node score: " << best_node_->score(params_.lambda));
-  if (best_node_->score(params_.lambda) > params_.zero_gain)
-    result.is_clear = true;
-  else
-  {
-    result.frontiers = getFrontiers();
-    result.is_clear = false;
-    delete best_branch_root_;
-    best_branch_root_ = NULL;
-  }
-  prev_planner_state_ = planner_state;
-  succeed("EXPLORE");
-
-  ROS_DEBUG("Deleting/Freeing!");
-  delete root;
-  kd_free(kd_tree_);
-  ROS_DEBUG("Done!");
-}
-
-RRTNode* AEPlanner::initialize()
-{
-  // Initialize kd-tree
-  kd_tree_ = kd_create(3);
-  best_node_ = NULL;
-  RRTNode* root = NULL;
-
-  if (best_branch_root_)
-  {
-    // Initialize with previous best branch
-
-    // Discard root node from tree since we just were there...
-    root = best_branch_root_->children_[0];
-    root->parent_ = NULL;
-    best_branch_root_->children_.clear();
-    delete best_branch_root_;
-
-    initializeKDTreeWithPreviousBestBranch(root);
-    reevaluatePotentialInformationGainRecursive(root);
-  }
-  else
-  {
-    // Initialize without any previous branch
-    root = new RRTNode();
-    root->state_[0] = current_state_[0];
-    root->state_[1] = current_state_[1];
-    root->state_[2] = current_state_[2];
-    kd_insert3(kd_tree_, root->state_[0], root->state_[1], root->state_[2], root);
-  }
-
-  return root;
-}
-
-void AEPlanner::initializeKDTreeWithPreviousBestBranch(RRTNode* root)
-{
-  RRTNode* current_node = root;
-  do
-  {
-    kd_insert3(kd_tree_, current_node->state_[0], current_node->state_[1],
-               current_node->state_[2], current_node);
-    if (current_node->children_.size())
-      current_node = current_node->children_[0];
-  } while (current_node->children_.size());
-}
-
-void AEPlanner::reevaluatePotentialInformationGainRecursive(RRTNode* node)
-{
-  if (!priority_cache_valid_) computePriorityCache();
-  std::pair<double, double> ret = gainCubature(node->state_); // FIXME use gp?
-  node->state_[3] = ret.second;  // Assign yaw angle that maximizes g
-  node->gain_ = ret.first;
-  for (typename std::vector<RRTNode*>::iterator node_it = node->children_.begin();
-       node_it != node->children_.end(); ++node_it)
-    reevaluatePotentialInformationGainRecursive(*node_it);
-}
-
-void AEPlanner::expandRRT()
-{
-  std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
-
-  // Refresh the priority voxel cache if the robot has moved enough; otherwise
-  // reuse the previous cycle's result. The O(N_all_leaves) shared_lock iteration
-  // inside computePriorityCache grows with FREE-voxel accumulation — rebuilding
-  // every 1.5 m of travel instead of every execute() tick keeps ot_mutex_ free.
-  computePriorityCache();
-  ROS_DEBUG_STREAM("[NBV] Priority cache: " << priority_cache_.size() << " voxels");
-
-  // Expand an RRT tree and calculate information gain in every node
-  ROS_DEBUG_STREAM("Entering expanding RRT");
-  for (int n = 0; (n < params_.init_iterations or
-                   (n < params_.cutoff_iterations and
-                    best_node_->score(params_.lambda) < params_.zero_gain)) and
-                  ros::ok();
-       ++n)
-  {
-    ROS_DEBUG_STREAM("In expand RRT iteration: " << n);
-
-
-
-    RRTNode* new_node = new RRTNode();
-    RRTNode* nearest;
-    la3dm::OcTreeNode ot_result;
-
-    // Sample new point around agent and check that
-    // (1) it is within the boundaries
-    // (2) it is in known space
-    // (3) the path between the new node and it's parent does not contain any
-    // obstacles
-
-    bool sample_found = false;
-    int unknown_count = 0, collision_count = 0, oob_count = 0;
-    const int fast_tries = std::min(100, params_.max_sampling_attempts);
-
-    auto try_candidate = [&](Eigen::Vector4d candidate) -> bool {
-      new_node->state_ = candidate;
-      nearest = chooseParent(new_node, params_.extension_range, kd_tree_);
-      new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
-      {
-        std::shared_lock<std::shared_mutex> lock(ot_mutex_);
-        ot_result = ot->search(new_node->state_[0], new_node->state_[1], new_node->state_[2]);
-      }
-      if (ot_result.get_state() == la3dm::State::UNKNOWN) { ++unknown_count; return false; }
-      if (!isInsideBoundaries(new_node->state_))           { ++oob_count;     return false; }
-      if (collisionLine(nearest->state_, new_node->state_, params_.bounding_radius))
-                                                           { ++collision_count; return false; }
-      return true;
-    };
-
-    // Directed sampling: prefer REPOSITION override if set, else top TPM target.
-    // tpm_snapshot kept alive here so active_target pointer remains valid.
-    {
-      std::vector<ScoredTarget> tpm_snapshot;
-      const ScoredTarget* active_target = nullptr;
-
-      if (has_reposition_target_)
-      {
-        active_target = &reposition_target_;
-      }
-      else if (tpm_)
-      {
-        tpm_snapshot  = tpm_->getTargets();
-        if (!tpm_snapshot.empty()) active_target = &tpm_snapshot[0];
-      }
-
-      if (active_target)
-      {
-        DirectedSampler* sampler =
-            (active_target->type == TargetType::E_FREE &&
-             active_target->w_normal < params_.w_normal_thresh)
-            ? static_cast<DirectedSampler*>(frontier_sampler_.get())
-            : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
-
-        auto candidates = sampler->sampleCandidates(
-            *active_target, current_state_, ot, params_);
-        for (const CandidatePose& cp : candidates)
-        {
-          if (try_candidate(cp.state)) { sample_found = true; break; }
-        }
-      }
-    }
-
-    // Fallback: original uniform sampling if directed sampler found nothing.
-    for (int tries = 0; tries < fast_tries && !sample_found && ros::ok(); ++tries)
-    {
-      Eigen::Vector4d sample = current_state_ + sampleNewPoint();
-      sample[3] = 2.0 * M_PI * (((double)rand()) / ((double)RAND_MAX) - 0.5);
-      if (try_candidate(sample))
-        sample_found = true;
-    }
-
-    if (!sample_found)
-    {
-      ROS_WARN_STREAM("expandRRT: no feasible sample after "
-                      << params_.max_sampling_attempts
-                      << " tries (unknown=" << unknown_count
-                      << ", collision=" << collision_count
-                      << ", oob=" << oob_count
-                      << ") at iter " << n << ". Stopping expansion."
-                      << " Map may still be mostly UNKNOWN — check sonar TF and insert_pointcloud rate.");
-      delete new_node;
-      break;
-    }
-
-    ROS_DEBUG_STREAM("New node (" << new_node->state_[0] << ", " << new_node->state_[1]
-                                  << ", " << new_node->state_[2] << ")");
-    // new_node is now ready to be added to tree
-    new_node->parent_ = nearest;
-    nearest->children_.push_back(new_node);
-
-    // rewire tree with new node
-    rewire(kd_tree_, nearest, params_.extension_range, params_.bounding_radius,
-           params_.d_overshoot_);
-
-    // Calculate potential information gain for new_node at its sampled yaw
-    ROS_DEBUG_STREAM("Get gain");
-    std::pair<double, double> ret = getGain(new_node);
-    new_node->gain_ = ret.first;
-    ROS_DEBUG_STREAM("Insert into KDTREE");
-    kd_insert3(kd_tree_, new_node->state_[0], new_node->state_[1], new_node->state_[2],
-               new_node);
-
-    // Update best node — only non-UNKNOWN nodes qualify as NBV viewpoints.
-    // UNKNOWN nodes remain in the tree for path connectivity but are never
-    // selected as the goal pose sent to the robot.
-    ROS_DEBUG_STREAM("Update best node");
-    if (ot_result.get_state() != la3dm::State::UNKNOWN &&
-        (!best_node_ or
-         new_node->score(params_.lambda) > best_node_->score(params_.lambda)))
-      best_node_ = new_node;
-
-    ROS_DEBUG_STREAM("iteration Done!");
-  }
-
-  ROS_DEBUG_STREAM("expandRRT Done!");
+  // Should never reach here with the new state machine.
+  result.is_clear             = true;
+  result.pose.pose            = vecToPose(current_state_);
+  result.pose.header.stamp    = ros::Time::now();
+  result.pose.header.frame_id = params_.world_frame;
+  succeed("FALLTHROUGH_HOLD");
 }
 
 Eigen::Vector4d AEPlanner::sampleNewPoint()
@@ -1249,14 +983,6 @@ Eigen::Vector4d AEPlanner::restrictDistance(Eigen::Vector4d nearest,
   new_pos[2] = origin[2] + direction[2];
 
   return new_pos;
-}
-
-std::pair<double, double> AEPlanner::getGain(RRTNode* node)
-{
-  node->gain_explicitly_calculated_ = true;
-  std::pair<double, double> ret = gainCubature(node->state_);
-  ROS_INFO_STREAM("gain expl: " << ret.first);
-  return ret;
 }
 
 bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
@@ -1527,30 +1253,6 @@ double AEPlanner::gainExploration(const Eigen::Vector4d& state)
 
   return params_.w_unknown * static_cast<double>(n_unknown)
        + params_.w_cubature_explore * cub_score;
-}
-
-geometry_msgs::PoseArray AEPlanner::getFrontiers()
-{
-  geometry_msgs::PoseArray frontiers;
-
-  pigain::BestNode srv;
-  srv.request.threshold = 50; // FIXME parameterize
-  ROS_INFO_STREAM("Asking pigain for frontiers with threshold: " << srv.request.threshold);
-  if (best_node_client_.call(srv))
-  {
-    ROS_INFO_STREAM("pigain returned " << srv.response.best_node.size() << " frontiers. Best gain was " << srv.response.gain);
-    for (int i = 0; i < srv.response.best_node.size(); ++i)
-    {
-      geometry_msgs::Pose frontier;
-      frontier.position = srv.response.best_node[i];
-      frontiers.poses.push_back(frontier);
-    }
-  }
-  else
-  {
-  }
-
-  return frontiers;
 }
 
 bool AEPlanner::isInsideBoundaries(Eigen::Vector4d point)
@@ -1849,28 +1551,6 @@ geometry_msgs::Pose AEPlanner::vecToPose(Eigen::Vector4d state)
   tf::poseTFToMsg(pose_tf, pose);
 
   return pose;
-}
-
-void AEPlanner::publishEvaluatedNodesRecursive(RRTNode* node)
-{
-  if (!node)
-    return;
-  for (typename std::vector<RRTNode*>::iterator node_it = node->children_.begin();
-       node_it != node->children_.end(); ++node_it)
-  {
-    if ((*node_it)->gain_explicitly_calculated_)
-    {
-      pigain::Node pig_node;
-      pig_node.gain = (*node_it)->gain_;
-      pig_node.position.x = (*node_it)->state_[0];
-      pig_node.position.y = (*node_it)->state_[1];
-      pig_node.position.z = (*node_it)->state_[2];
-      pig_node.yaw = (*node_it)->state_[3];
-      gain_pub_.publish(pig_node);
-    }
-
-    publishEvaluatedNodesRecursive(*node_it);
-  }
 }
 
 //-----------------------------------------------------------------------------
