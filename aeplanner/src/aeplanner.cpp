@@ -394,7 +394,10 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     double dist_to_wp =
         (current_state_.head<3>() - resolve_waypoints_[resolve_wp_idx_].head<3>()).norm();
 
-    if (dist_to_wp < params_.dwell_arrival_thresh)
+    bool is_final_wp = (resolve_wp_idx_ == (int)resolve_waypoints_.size() - 1);
+    double arrival_thresh = is_final_wp ? params_.dwell_arrival_thresh
+                                        : params_.wp_arrival_threshold;
+    if (dist_to_wp < arrival_thresh)
     {
       ++resolve_wp_idx_;
       if (resolve_wp_idx_ >= (int)resolve_waypoints_.size())
@@ -706,7 +709,10 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         // Arrival at current waypoint?
         double dist_to_wp =
             (current_state_.head<3>() - explore_waypoints_[explore_wp_idx_].head<3>()).norm();
-        if (dist_to_wp < params_.dwell_arrival_thresh)
+        bool is_final_wp = (explore_wp_idx_ == (int)explore_waypoints_.size() - 1);
+        double arrival_thresh = is_final_wp ? params_.dwell_arrival_thresh
+                                            : params_.wp_arrival_threshold;
+        if (dist_to_wp < arrival_thresh)
         {
           ++explore_wp_idx_;
           if (explore_wp_idx_ >= (int)explore_waypoints_.size())
@@ -954,10 +960,14 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
         path.push_back(goal);
     }
 
-    // Forward-facing yaw for every intermediate waypoint
+    // Yaw for every intermediate waypoint: direction of travel TO that waypoint
+    // (backward-looking: from previous position toward current waypoint).
+    // This ensures the robot faces its actual travel direction rather than
+    // pre-rotating toward the next segment before reaching the current turn.
     for (int i = 0; i + 1 < (int)path.size(); ++i)
     {
-      Eigen::Vector3d d = path[i+1].head<3>() - path[i].head<3>();
+      const Eigen::Vector3d& prev = (i == 0) ? current_state_.head<3>() : path[i-1].head<3>();
+      Eigen::Vector3d d = path[i].head<3>() - prev;
       if (d.norm() > 1e-6) path[i][3] = std::atan2(d[1], d[0]);
     }
   }

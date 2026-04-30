@@ -84,7 +84,8 @@ namespace aeplanner
     double local_radius;        // radius defining "local volume" (default 10.0)
     float  w_normal_thresh;     // min PCA anisotropy for reliable frontier normal (default 0.4)
     double tpm_rate;            // TPM update rate in Hz (default 2.0)
-    double dwell_arrival_thresh; // dist to committed viewpoint that triggers DWELL entry (default 1.0)
+    double dwell_arrival_thresh;  // dist to committed viewpoint that triggers DWELL entry (default 1.0)
+    double wp_arrival_threshold;  // dist to advance past an intermediate waypoint (default 0.2)
     int    min_cluster_size;    // min voxels per frontier cluster to be considered a target (default 5)
 
     // --- Exploration gain parameters ---
