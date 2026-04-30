@@ -185,60 +185,89 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         succeed("RESOLVE_HOLD"); return;
       }
 
-      const ScoredTarget& top = tpm_targets[0];
-
-      DirectedSampler* sampler =
-          (top.type == TargetType::E_FREE &&
-           top.w_normal < params_.w_normal_thresh)
-          ? static_cast<DirectedSampler*>(frontier_sampler_.get())
-          : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
-
-      auto candidates = sampler->sampleCandidates(top, current_state_, ot_, params_);
-
+      // Build priority cache once per selection episode — it is robot-position-based,
+      // not target-specific, so one build covers all targets in the loop below.
       priority_cache_valid_ = false;
       computePriorityCache();
 
-      double best_score = -1.0;
+      int winning_ti = -1;
+      double winning_best_score = -1.0;
       std::vector<std::pair<Eigen::Vector4d, double>> scored_candidates;
-      for (const CandidatePose& cp : candidates)
+
+      for (int ti = 0; ti < static_cast<int>(tpm_targets.size()); ++ti)
       {
-        if (!isInsideBoundaries(cp.state)) continue;
+        const ScoredTarget& top = tpm_targets[ti];
+
+        DirectedSampler* sampler =
+            (top.type == TargetType::E_FREE &&
+             top.w_normal < params_.w_normal_thresh)
+            ? static_cast<DirectedSampler*>(frontier_sampler_.get())
+            : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
+
+        auto candidates = sampler->sampleCandidates(top, current_state_, ot_, params_);
+
+        double best_score   = -1.0;
+        int    n_valid_cands = 0;
+        std::vector<std::pair<Eigen::Vector4d, double>> cands_this_target;
+
+        for (const CandidatePose& cp : candidates)
         {
-          std::shared_lock<std::shared_mutex> lk(ot_mutex_);
-          if (ot_->search(cp.state[0], cp.state[1], cp.state[2]).get_state()
-                  == la3dm::State::UNKNOWN)
-            continue;
+          if (!isInsideBoundaries(cp.state)) continue;
+          {
+            std::shared_lock<std::shared_mutex> lk(ot_mutex_);
+            if (ot_->search(cp.state[0], cp.state[1], cp.state[2]).get_state()
+                    == la3dm::State::UNKNOWN)
+              continue;
+          }
+          n_valid_cands++;
+          auto [gain, yaw] = gainCubature(cp.state);
+          double dist  = (cp.state.head<3>() - current_state_.head<3>()).norm();
+          double score = gain * std::exp(-params_.lambda_dist * dist);
+          cands_this_target.push_back({cp.state, score});
+          if (score > best_score)
+          {
+            best_score           = score;
+            committed_viewpoint_ = cp.state;
+          }
         }
-        auto [gain, yaw] = gainCubature(cp.state);
-        double dist = (cp.state.head<3>() - current_state_.head<3>()).norm();
-        double score = gain * std::exp(-params_.lambda_dist * dist);
-        scored_candidates.push_back({cp.state, score});
-        if (score > best_score)
+
+        if (n_valid_cands == 0 || best_score <= 0.0)
         {
-          best_score           = score;
-          committed_viewpoint_ = cp.state;
+          ROS_WARN_STREAM("[RESOLVE] Target #" << ti
+              << " (" << top.pos.transpose() << ") — "
+              << (n_valid_cands == 0 ? "no valid candidates" : "all zero gain")
+              << "; recording failure, trying next target.");
+          if (tpm_) tpm_->recordFailure(top.pos);
+          continue;
         }
+
+        // Found a viable target — commit to it.
+        winning_ti         = ti;
+        winning_best_score = best_score;
+        scored_candidates  = std::move(cands_this_target);
+        committed_target_        = top;
+        has_committed_viewpoint_ = true;
+        resolve_waypoints_.clear();
+        resolve_wp_idx_ = 0;
+        ROS_INFO_STREAM("[RESOLVE] Committed viewpoint ("
+          << committed_viewpoint_[0] << ", " << committed_viewpoint_[1]
+          << ", " << committed_viewpoint_[2]
+          << ") yaw=" << (committed_viewpoint_[3] * 180.0 / M_PI) << " deg"
+          << "  score=" << best_score
+          << "  (target #" << ti << " of " << tpm_targets.size() << ")");
+        break;
       }
 
-      if (best_score <= 0.0)
+      if (winning_ti < 0)
       {
-        ROS_WARN("[RESOLVE] No valid candidate viewpoint found; holding position.");
+        ROS_WARN_STREAM("[RESOLVE] All " << tpm_targets.size()
+            << " targets exhausted — no positive-gain candidates. Holding position.");
         result.is_clear             = true;
         result.pose.pose            = vecToPose(current_state_);
         result.pose.header.stamp    = ros::Time::now();
         result.pose.header.frame_id = params_.world_frame;
         succeed("RESOLVE_HOLD_NO_CAND"); return;
       }
-
-      committed_target_        = top;
-      has_committed_viewpoint_ = true;
-      resolve_waypoints_.clear();
-      resolve_wp_idx_ = 0;
-      ROS_INFO_STREAM("[RESOLVE] Committed viewpoint ("
-        << committed_viewpoint_[0] << ", " << committed_viewpoint_[1]
-        << ", " << committed_viewpoint_[2]
-        << ") yaw=" << (committed_viewpoint_[3] * 180.0 / M_PI) << " deg"
-        << "  score=" << best_score);
 
       // ── Publish candidates + committed viewpoint (clears old RRT tree) ──
       {
@@ -266,7 +295,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           tf::Quaternion cq; cq.setEuler(0.0, 0.0, state[3]);
           m.pose.orientation.x = cq.x(); m.pose.orientation.y = cq.y();
           m.pose.orientation.z = cq.z(); m.pose.orientation.w = cq.w();
-          double rel = (best_score > 0) ? score / best_score : 0.0;
+          double rel = score / winning_best_score;
           m.scale.x = std::max(rel * 1.5, 0.1);
           m.scale.y = 0.12; m.scale.z = 0.12;
           m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 0.8;
@@ -352,7 +381,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           p.x = wp[0]; p.y = wp[1]; p.z = wp[2];
           path_marker.points.push_back(p);
         }
-        path_marker.scale.x = 0.1;
+        path_marker.scale.x = 0.02;
         path_marker.color.r = 0.0; path_marker.color.g = 0.9;
         path_marker.color.b = 0.2; path_marker.color.a = 0.9;
         path_marker.lifetime = ros::Duration(0);
