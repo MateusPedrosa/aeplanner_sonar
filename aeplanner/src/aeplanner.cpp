@@ -1560,6 +1560,12 @@ void AEPlanner::publishMapViz(const ros::TimerEvent&)
   m_pub_occ_->publish();
   m_pub_unc_->publish();
   m_pub_var_->publish();
+
+  if (!params_.boundary_min.empty() && !params_.boundary_max.empty()) {
+    visualization_msgs::Marker bbx_marker =
+        createBoundingBoxMarker(params_.boundary_min, params_.boundary_max, 0, "map");
+    bbx_marker_pub_.publish(bbx_marker);
+  }
 }
 
 
