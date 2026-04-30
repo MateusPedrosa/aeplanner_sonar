@@ -126,56 +126,6 @@ std::vector<ClassifiedVoxel> classifyExtracted(
   return result;
 }
 
-std::vector<LeafEntry> extractLeavesFromIndex(
-    const OccupiedUnknownIndex& idx,
-    const Eigen::Vector3d& robot_pos,
-    float r_max)
-{
-  std::shared_lock<std::shared_mutex> lk(idx.mtx);
-
-  std::vector<LeafEntry> leaves;
-  leaves.reserve(std::min(idx.cells.size(), size_t(32768)));
-
-  const float r2 = r_max * r_max;
-  const Eigen::Vector3f rp(robot_pos.x(), robot_pos.y(), robot_pos.z());
-
-  for (const auto& kv : idx.cells)
-  {
-    const OccupiedUnknownIndex::VoxelData& vd = kv.second;
-    if ((vd.pos - rp).squaredNorm() > r2) continue;
-    LeafEntry e;
-    e.pos        = vd.pos;
-    e.state      = vd.state;
-    e.var        = vd.var;
-    e.size       = vd.size;
-
-    leaves.push_back(e);
-  }
-
-  return leaves;
-}
-
-std::vector<LeafEntry> extractAllLeavesFromIndex(const OccupiedUnknownIndex& idx)
-{
-  std::shared_lock<std::shared_mutex> lk(idx.mtx);
-
-  std::vector<LeafEntry> leaves;
-  leaves.reserve(idx.cells.size());
-
-  for (const auto& kv : idx.cells)
-  {
-    const OccupiedUnknownIndex::VoxelData& vd = kv.second;
-    LeafEntry e;
-    e.pos        = vd.pos;
-    e.state      = vd.state;
-    e.var        = vd.var;
-    e.size       = vd.size;
-
-    leaves.push_back(e);
-  }
-
-  return leaves;
-}
 
 std::vector<ClassifiedVoxel> classifyVoxels(
     const std::shared_ptr<la3dm::BGKLOctoMap>& map,

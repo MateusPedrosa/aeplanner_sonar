@@ -33,11 +33,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   double viz_period = (params_.viz_rate > 0.0) ? (1.0 / params_.viz_rate) : 0.5;
   viz_timer_ = nh_.createTimer(ros::Duration(viz_period), &AEPlanner::publishMapViz, this);
 
-  // Incremental voxel index — populated by cloudCallback, read by TPM.
-  occ_unk_idx_ = std::make_shared<OccupiedUnknownIndex>();
-  occ_unk_idx_->resolution = (float)params_.resolution;
-
-  // Initialise Target Priority Map (reads occ_unk_idx_, no ot_mutex_ needed)
+  // Initialise Target Priority Map — queries the map directly under shared_lock.
   TPMParams tpm_params;
   tpm_params.sigma2_thresh = params_.sigma2_thresh;
   tpm_params.w_frontier    = params_.w_frontier;
@@ -52,7 +48,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   tpm_params.min_cluster_size   = params_.min_cluster_size;
   tpm_params.min_u_cluster_size = params_.min_u_cluster_size;
 
-  tpm_ = std::make_unique<TargetPriorityMap>(nh_, occ_unk_idx_, tpm_params);
+  tpm_ = std::make_unique<TargetPriorityMap>(nh_, ot_, ot_mutex_, tpm_params);
 
   double tpm_period = (params_.tpm_rate > 0.0) ? (1.0 / params_.tpm_rate) : 0.5;
   tpm_timer_ = nh_.createTimer(ros::Duration(tpm_period),
@@ -1395,56 +1391,6 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   auto t_lock_acquired = ros::WallTime::now();
   ot_->commit_pointcloud_update(prepared);
   auto t_committed = ros::WallTime::now();
-
-  // Phase 3: populate incremental index — while still holding unique_lock so
-  // map->search() reads are consistent with the just-committed scan.
-  // Cost: N_scan × 7 targeted lookups ≈ a few ms, negligible vs commit.
-  if (occ_unk_idx_)
-  {
-    const float res = occ_unk_idx_->resolution;
-    static const float kOff[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    std::unique_lock<std::shared_mutex> idx_lk(occ_unk_idx_->mtx);
-    for (const auto& pt : *pcl_cloud)
-    {
-      // Update the scan point itself
-      int64_t k = OccupiedUnknownIndex::packKey(pt.x, pt.y, pt.z, res);
-      la3dm::OcTreeNode nd = ot_->search(pt.x, pt.y, pt.z);
-      occ_unk_idx_->cells[k] = {
-          Eigen::Vector3f(pt.x, pt.y, pt.z),
-          nd.get_state(), nd.get_var(), res};
-      for (const auto& off : kOff)
-      {
-        float nx = pt.x + off[0] * res;
-        float ny = pt.y + off[1] * res;
-        float nz = pt.z + off[2] * res;
-        int64_t nk = OccupiedUnknownIndex::packKey(nx, ny, nz, res);
-        la3dm::OcTreeNode nn = ot_->search(nx, ny, nz);
-        occ_unk_idx_->cells[nk] = {
-            Eigen::Vector3f(nx, ny, nz),
-            nn.get_state(), nn.get_var(), res};
-      }
-    }
-
-    // Refresh all OCCUPIED+high-var index entries within sensor range.
-    // Ray-tracing can free voxels that are not scan-point neighbours, leaving
-    // stale OCCUPIED entries that the TPM would report as spurious U_TARGETs.
-    // Filtering to OCCUPIED+high-var keeps this O(small) in a converged map.
-    const float r_max2 = (float)(params_.r_max * params_.r_max);
-    for (auto& kv : occ_unk_idx_->cells)
-    {
-      if (kv.second.state != la3dm::State::OCCUPIED) continue;
-      if (kv.second.var < params_.sigma2_thresh) continue;
-      const Eigen::Vector3f& pos = kv.second.pos;
-      float dx = pos.x() - origin.x();
-      float dy = pos.y() - origin.y();
-      float dz = pos.z() - origin.z();
-      if (dx*dx + dy*dy + dz*dz > r_max2) continue;
-      la3dm::OcTreeNode nd2 = ot_->search(pos.x(), pos.y(), pos.z());
-      kv.second.state      = nd2.get_state();
-      kv.second.var        = nd2.get_var();
-
-    }
-  }
 
   lock.unlock();
   ROS_WARN_THROTTLE(2.0,

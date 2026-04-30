@@ -8,9 +8,11 @@ namespace aeplanner
 
 TargetPriorityMap::TargetPriorityMap(
     ros::NodeHandle& nh,
-    const std::shared_ptr<OccupiedUnknownIndex>& idx,
+    const std::shared_ptr<la3dm::BGKLOctoMap>& ot,
+    std::shared_mutex& ot_mutex,
     const TPMParams& params)
-  : idx_(idx)
+  : ot_(ot)
+  , ot_mutex_(ot_mutex)
   , params_(params)
   , blacklist_(params.n_fail, params.t_cooldown)
   , robot_pos_(Eigen::Vector3d::Zero())
@@ -23,7 +25,7 @@ TargetPriorityMap::TargetPriorityMap(
 
 void TargetPriorityMap::update(const ros::TimerEvent&)
 {
-  if (!idx_) return;
+  if (!ot_) return;
 
   Eigen::Vector3d robot_pos;
   {
@@ -31,13 +33,14 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
     robot_pos = robot_pos_;
   }
 
-  // Read from the incremental OccupiedUnknownIndex — no ot_mutex_ needed.
-  // U_TARGETs are extracted globally (no distance limit) so that high-variance
-  // voxels observed in earlier passes are not lost when the robot moves away.
-  // E_OCC/E_FREE frontiers are kept local (within r_max) since they are only
-  // actionable near the robot and the global set would be very large.
+  // Phase 1: extract leaves from the real map under a brief shared_lock.
+  // All classification and clustering runs after the lock is released.
   ros::WallTime t_tpm0 = ros::WallTime::now();
-  std::vector<LeafEntry> raw_leaves = extractAllLeavesFromIndex(*idx_);
+  std::vector<LeafEntry> raw_leaves;
+  {
+    std::shared_lock<std::shared_mutex> lk(ot_mutex_);
+    raw_leaves = extractLeaves(ot_, robot_pos, params_.r_max);
+  }
   ros::WallTime t_tpm1 = ros::WallTime::now();
   std::vector<ClassifiedVoxel> all_voxels =
       classifyExtracted(raw_leaves, params_.sigma2_thresh);

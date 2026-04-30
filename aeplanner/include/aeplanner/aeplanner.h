@@ -116,10 +116,6 @@ private:
   // callback, so a growing map does not starve cloudCallback.
   ros::Timer viz_timer_;
 
-  // Incremental index of occupied+neighbour voxels, populated by cloudCallback
-  // after each commit so TPM never needs to acquire ot_mutex_.
-  std::shared_ptr<OccupiedUnknownIndex> occ_unk_idx_;
-
   // Target Priority Map — runs as a ros::Timer callback inside this process.
   std::unique_ptr<TargetPriorityMap> tpm_;
   ros::Timer                         tpm_timer_;

@@ -36,14 +36,15 @@ struct TPMParams
   int    min_u_cluster_size; // min voxels per U_TARGET cluster to consider as a target (default 1)
 };
 
-// In-process Target Priority Map. Runs as a ros::Timer callback that reads
-// the OccupiedUnknownIndex (populated by cloudCallback after each commit).
-// No ot_mutex_ access — TPM and cloudCallback are decoupled via the index.
+// In-process Target Priority Map. Runs as a ros::Timer callback.
+// Takes a brief shared_lock on ot_mutex_ to extract leaves from the map,
+// then releases the lock before doing all classification and scoring work.
 class TargetPriorityMap
 {
 public:
   TargetPriorityMap(ros::NodeHandle& nh,
-                    const std::shared_ptr<OccupiedUnknownIndex>& idx,
+                    const std::shared_ptr<la3dm::BGKLOctoMap>& ot,
+                    std::shared_mutex& ot_mutex,
                     const TPMParams& params);
 
   // Timer callback — classifies, clusters, scores, publishes /tpm/targets.
@@ -67,7 +68,8 @@ private:
   ros::Publisher                          clusters_pub_;
   ros::Publisher                          u_clusters_pub_;
 
-  std::shared_ptr<OccupiedUnknownIndex>    idx_;
+  std::shared_ptr<la3dm::BGKLOctoMap>     ot_;
+  std::shared_mutex&                      ot_mutex_;
 
   TPMParams params_;
   Blacklist blacklist_;
