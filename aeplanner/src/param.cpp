@@ -279,6 +279,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/min_cluster_size", params.min_cluster_size)) {
       ROS_WARN_STREAM("No viewplanner/min_cluster_size specified. Default: " << params.min_cluster_size);
     }
+    params.min_u_cluster_size = 1;
+    if (!ros::param::get(ns + "/viewplanner/min_u_cluster_size", params.min_u_cluster_size)) {
+      ROS_WARN_STREAM("No viewplanner/min_u_cluster_size specified. Default: " << params.min_u_cluster_size);
+    }
 
     // --- Exploration gain parameters ---
     params.n_explore_rays_az = 15;

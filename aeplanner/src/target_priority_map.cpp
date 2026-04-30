@@ -87,6 +87,12 @@ void TargetPriorityMap::update(const ros::TimerEvent&)
     };
     occ_clusters.erase( std::remove_if(occ_clusters.begin(),  occ_clusters.end(),  too_small), occ_clusters.end());
     free_clusters.erase(std::remove_if(free_clusters.begin(), free_clusters.end(), too_small), free_clusters.end());
+
+    const size_t min_u_sz = static_cast<size_t>(std::max(1, params_.min_u_cluster_size));
+    auto u_too_small = [min_u_sz](const FrontierCluster& c){
+      return c.member_indices.size() < min_u_sz;
+    };
+    u_clusters.erase(std::remove_if(u_clusters.begin(), u_clusters.end(), u_too_small), u_clusters.end());
   }
 
   // Offset free-cluster member_indices so they index into the combined voxel vector

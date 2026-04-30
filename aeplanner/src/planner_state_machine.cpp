@@ -22,7 +22,8 @@ PlannerState PlannerStateMachine::tick(
     const Eigen::Vector4d&           robot_state,
     const Params&                    params)
 {
-  if (in_dwell_) return PlannerState::DWELL;
+  if (in_dwell_)              return PlannerState::DWELL;
+  if (in_resolve_commitment_) return PlannerState::RESOLVE;
 
   if (targets.empty()) return PlannerState::DONE;
 

@@ -32,7 +32,8 @@ struct TPMParams
   int    nbv_k;            // max targets to publish (default 1000)
   double resolution;       // voxel resolution for blacklist key (default 0.2 m)
   std::string world_frame; // TF frame for published messages (default "world")
-  int    min_cluster_size; // min voxels per cluster to consider as a target (default 5)
+  int    min_cluster_size;   // min voxels per E_TARGET cluster to consider as a target (default 5)
+  int    min_u_cluster_size; // min voxels per U_TARGET cluster to consider as a target (default 1)
 };
 
 // In-process Target Priority Map. Runs as a ros::Timer callback that reads

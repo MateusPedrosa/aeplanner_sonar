@@ -49,7 +49,8 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   tpm_params.nbv_k         = params_.nbv_k;
   tpm_params.resolution    = params_.resolution;
   tpm_params.world_frame   = params_.world_frame;
-  tpm_params.min_cluster_size = params_.min_cluster_size;
+  tpm_params.min_cluster_size   = params_.min_cluster_size;
+  tpm_params.min_u_cluster_size = params_.min_u_cluster_size;
 
   tpm_ = std::make_unique<TargetPriorityMap>(nh_, occ_unk_idx_, tpm_params);
 
@@ -169,6 +170,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       has_committed_viewpoint_ = false;
       resolve_waypoints_.clear();
       resolve_wp_idx_ = 0;
+      state_machine_->exitResolveCommitment();
     }
 
     prev_planner_state_ = PlannerState::RESOLVE;
@@ -247,6 +249,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         scored_candidates  = std::move(cands_this_target);
         committed_target_        = top;
         has_committed_viewpoint_ = true;
+        state_machine_->enterResolveCommitment();
         resolve_waypoints_.clear();
         resolve_wp_idx_ = 0;
         ROS_INFO_STREAM("[RESOLVE] Committed viewpoint ("
@@ -355,6 +358,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       {
         ROS_WARN("[RESOLVE] planPathToGoal failed; re-selecting viewpoint next iteration.");
         has_committed_viewpoint_ = false;
+        state_machine_->exitResolveCommitment();
         // Hold current position and re-evaluate next tick.
         result.is_clear             = true;
         result.pose.pose            = vecToPose(current_state_);
@@ -406,6 +410,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         state_machine_->enterDwell(committed_target_);
         dwell_controller_->startDwell(committed_target_, current_state_, params_);
         has_committed_viewpoint_ = false;
+        state_machine_->exitResolveCommitment();
         resolve_waypoints_.clear();
         resolve_wp_idx_ = 0;
 

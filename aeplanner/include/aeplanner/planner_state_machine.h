@@ -41,8 +41,17 @@ public:
 
   const ScoredTarget& dwellTarget() const { return dwell_target_; }
 
+  // Protect an in-progress RESOLVE navigation from being preempted by EXPLORE.
+  // Called when a viewpoint is committed; cleared on arrival, path failure, or
+  // stale-commitment invalidation.
+  void enterResolveCommitment() { in_resolve_commitment_ = true;  }
+  void exitResolveCommitment()  { in_resolve_commitment_ = false; }
+
+  bool inResolveCommitment() const { return in_resolve_commitment_; }
+
 private:
-  bool         in_dwell_   = false;
+  bool         in_dwell_              = false;
+  bool         in_resolve_commitment_ = false;
   ScoredTarget dwell_target_;
 };
 
