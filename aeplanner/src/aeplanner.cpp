@@ -1082,7 +1082,6 @@ void AEPlanner::computePriorityCache()
     {
       la3dm::OcTreeNode &node = it.get_node();
 
-      if (!node.classified) continue;
       if (!node.has_active_info_matrix()) continue;
 
       la3dm::point3f p_loc = it.get_loc();
@@ -1412,7 +1411,7 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
       la3dm::OcTreeNode nd = ot_->search(pt.x, pt.y, pt.z);
       occ_unk_idx_->cells[k] = {
           Eigen::Vector3f(pt.x, pt.y, pt.z),
-          nd.get_state(), nd.get_var(), res, nd.classified};
+          nd.get_state(), nd.get_var(), res};
       for (const auto& off : kOff)
       {
         float nx = pt.x + off[0] * res;
@@ -1422,7 +1421,7 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
         la3dm::OcTreeNode nn = ot_->search(nx, ny, nz);
         occ_unk_idx_->cells[nk] = {
             Eigen::Vector3f(nx, ny, nz),
-            nn.get_state(), nn.get_var(), res, nn.classified};
+            nn.get_state(), nn.get_var(), res};
       }
     }
 
@@ -1443,7 +1442,7 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
       la3dm::OcTreeNode nd2 = ot_->search(pos.x(), pos.y(), pos.z());
       kv.second.state      = nd2.get_state();
       kv.second.var        = nd2.get_var();
-      kv.second.classified = nd2.classified;
+
     }
   }
 

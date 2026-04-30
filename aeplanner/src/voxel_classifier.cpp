@@ -49,7 +49,7 @@ std::vector<LeafEntry> extractLeaves(
     e.state      = node.get_state();
     e.var        = node.get_var();
     e.size       = it.get_size();
-    e.classified = node.classified;
+
     leaves.push_back(e);
   }
 
@@ -86,8 +86,8 @@ std::vector<ClassifiedVoxel> classifyExtracted(
   {
     const float x = e.pos.x(), y = e.pos.y(), z = e.pos.z();
 
-    // --- U_TARGET: observed occupied surface voxel with sufficient variance ---
-    if (e.classified && e.state == la3dm::State::OCCUPIED)
+    // --- U_TARGET: occupied surface voxel with sufficient variance ---
+    if (e.state == la3dm::State::OCCUPIED)
     {
       if (e.var < sigma2_thresh) continue;
       bool adj_free = false;
@@ -148,7 +148,7 @@ std::vector<LeafEntry> extractLeavesFromIndex(
     e.state      = vd.state;
     e.var        = vd.var;
     e.size       = vd.size;
-    e.classified = vd.classified;
+
     leaves.push_back(e);
   }
 
@@ -170,7 +170,7 @@ std::vector<LeafEntry> extractAllLeavesFromIndex(const OccupiedUnknownIndex& idx
     e.state      = vd.state;
     e.var        = vd.var;
     e.size       = vd.size;
-    e.classified = vd.classified;
+
     leaves.push_back(e);
   }
 

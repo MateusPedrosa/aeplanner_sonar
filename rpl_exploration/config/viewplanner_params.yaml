@@ -11,7 +11,7 @@ viewplanner:
   R_cluster:           2.0     # Frontier clustering radius (m)
   w_normal_thresh:     0.4     # Min PCA anisotropy for reliable frontier normal
   min_cluster_size:    50       # Min voxels per E_TARGET cluster to be a valid frontier target (filters downsampling artifacts)
-  min_u_cluster_size:  25        # Min voxels per U_TARGET cluster to be considered a target
+  min_u_cluster_size:  15        # Min voxels per U_TARGET cluster to be considered a target
 
   # State machine
   alpha_bias:          1.0     # U vs E priority bias (1.0 = no bias)

@@ -32,7 +32,7 @@ struct LeafEntry {
   la3dm::State    state;
   float           var;
   float           size;
-  bool            classified;
+
 };
 
 // Incremental index of voxels near the robot, updated by cloudCallback
@@ -46,7 +46,7 @@ struct OccupiedUnknownIndex {
     la3dm::State    state;
     float           var;
     float           size;
-    bool            classified;
+  
   };
 
   std::unordered_map<int64_t, VoxelData> cells;
