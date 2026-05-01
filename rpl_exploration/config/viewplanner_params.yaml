@@ -30,5 +30,8 @@ viewplanner:
   N_fail:              3       # Consecutive failures before blacklisting a target
   T_cooldown:          30.0    # Blacklist cooldown duration (s)
 
+  # Navigation heading during RESOLVE travel
+  resolve_face_target: true   # true = face the target; false = face direction of travel (original behavior)
+
   # TPM
-  tpm_rate:            2.0     # TPM update frequency (Hz)
+  tpm_rate:            0.5     # TPM update frequency (Hz)

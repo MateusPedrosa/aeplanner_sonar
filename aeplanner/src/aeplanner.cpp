@@ -115,6 +115,10 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     state_pub_.publish(state_msg);
   }
 
+  // Pause TPM during RESOLVE: extractLeaves() holds shared_lock for ~1 s,
+  // starving cloudCallback while the robot is already committed to a target.
+  if (tpm_) tpm_->setPaused(planner_state == PlannerState::RESOLVE);
+
   // Handle DWELL: skip RRT, hold position and monitor target voxel
   if (planner_state == PlannerState::DWELL)
   {
@@ -457,7 +461,19 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
     Eigen::Vector4d next_pose;
     next_pose.head<3>() = current_state_.head<3>() + step * dir;
-    next_pose[3]        = wp[3];  // forward yaw for intermediates, sensing yaw for final
+
+    {
+      double dist_to_goal =
+          (committed_viewpoint_.head<3>() - next_pose.head<3>()).norm();
+      if (dist_to_goal < params_.dwell_arrival_thresh)
+        next_pose[3] = committed_viewpoint_[3];
+      else if (params_.resolve_face_target)
+        next_pose[3] = std::atan2(
+            committed_target_.pos.y() - next_pose[1],
+            committed_target_.pos.x() - next_pose[0]);
+      else
+        next_pose[3] = wp[3];
+    }
 
     // ── Refresh committed viewpoint + target markers on every step ───────
     {

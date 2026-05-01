@@ -62,6 +62,9 @@ public:
   // Update the robot position used for map radius query.
   void setRobotPos(const Eigen::Vector3d& pos);
 
+  // Pause/resume the update() timer callback (e.g. during RESOLVE).
+  void setPaused(bool p) { paused_.store(p, std::memory_order_relaxed); }
+
 private:
   ros::Publisher                          targets_pub_;
   ros::Publisher                          viz_pub_;
@@ -79,6 +82,8 @@ private:
 
   std::vector<ScoredTarget> targets_;
   mutable std::mutex targets_mutex_;
+
+  std::atomic<bool> paused_{ false };
 
   aeplanner::TargetList toROSMsg(const std::vector<ScoredTarget>& targets) const;
   void publishViz(const std::vector<ScoredTarget>& targets) const;

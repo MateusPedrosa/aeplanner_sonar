@@ -83,7 +83,7 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viz_rate", params.viz_rate)) {
       ROS_WARN_STREAM("No /viz_rate specified. Default: " << params.viz_rate);
     }
-    params.max_vis_radius = 20.0;
+    params.max_vis_radius = -1.0;
     if (!ros::param::get(ns + "/max_vis_radius", params.max_vis_radius)) {
       ROS_WARN_STREAM("No /max_vis_radius specified. Default: " << params.max_vis_radius);
     }
@@ -282,6 +282,10 @@ namespace aeplanner
     params.min_u_cluster_size = 1;
     if (!ros::param::get(ns + "/viewplanner/min_u_cluster_size", params.min_u_cluster_size)) {
       ROS_WARN_STREAM("No viewplanner/min_u_cluster_size specified. Default: " << params.min_u_cluster_size);
+    }
+    params.resolve_face_target = true;
+    if (!ros::param::get(ns + "/viewplanner/resolve_face_target", params.resolve_face_target)) {
+      ROS_WARN_STREAM("No viewplanner/resolve_face_target specified. Default: " << params.resolve_face_target);
     }
 
     // --- Exploration gain parameters ---

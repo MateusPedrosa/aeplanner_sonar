@@ -88,6 +88,7 @@ namespace aeplanner
     double wp_arrival_threshold;  // dist to advance past an intermediate waypoint (default 0.2)
     int    min_cluster_size;    // min voxels per frontier cluster to be considered a target (default 5)
     int    min_u_cluster_size;  // min voxels per U_TARGET cluster to be considered a target (default 1)
+    bool   resolve_face_target; // true = face target while traveling in RESOLVE; false = face direction of travel (default true)
 
     // --- Exploration gain parameters ---
     int    n_explore_rays_az;     // azimuth ray count for gainExploration (default 15)
