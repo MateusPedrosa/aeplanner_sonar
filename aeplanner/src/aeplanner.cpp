@@ -50,7 +50,10 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
 
   tpm_ = std::make_unique<TargetPriorityMap>(nh_, ot_, ot_mutex_, tpm_params);
 
-  double tpm_period = (params_.tpm_rate > 0.0) ? (1.0 / params_.tpm_rate) : 0.5;
+  // Timer fires only during DONE (startup / no-target recovery) because
+  // setPaused(true) suppresses it in EXPLORE, RESOLVE, and DWELL.
+  // Episode boundaries use updateNow() for an immediate synchronous refresh.
+  double tpm_period = (params_.tpm_rate > 0.0) ? (1.0 / params_.tpm_rate) : 2.0;
   tpm_timer_ = nh_.createTimer(ros::Duration(tpm_period),
                                &TargetPriorityMap::update,
                                tpm_.get());
@@ -115,9 +118,14 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     state_pub_.publish(state_msg);
   }
 
-  // Pause TPM during RESOLVE: extractLeaves() holds shared_lock for ~1 s,
-  // starving cloudCallback while the robot is already committed to a target.
-  if (tpm_) tpm_->setPaused(planner_state == PlannerState::RESOLVE);
+  // Pause TPM during all committed states. extractLeaves() holds shared_lock
+  // for several seconds, starving cloudCallback during travel and observation.
+  // TPM is updated explicitly at episode boundaries (EXPLORE arrival, DWELL
+  // exit) via updateNow(), so background timer fires are not needed.
+  if (tpm_) tpm_->setPaused(
+      planner_state == PlannerState::RESOLVE ||
+      planner_state == PlannerState::DWELL   ||
+      planner_state == PlannerState::EXPLORE);
 
   // Handle DWELL: skip RRT, hold position and monitor target voxel
   if (planner_state == PlannerState::DWELL)
@@ -139,6 +147,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         if (tpm_) tpm_->recordFailure(dt.pos);
       }
       state_machine_->exitDwell();
+      tpm_update_needed_ = true;  // updateNow() deferred to next selection phase
     }
     // Return the current pose as goal so rpl_exploration keeps the robot
     // stationary and immediately replans (avoiding the "no frontiers →
@@ -178,6 +187,12 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     // ── Select viewpoint once per RESOLVE episode ─────────────────────────
     if (!has_committed_viewpoint_)
     {
+      if (tpm_update_needed_ && tpm_) {
+        tpm_->updateNow();
+        tpm_targets = tpm_->getTargets();
+        tpm_update_needed_ = false;
+      }
+
       if (tpm_targets.empty())
       {
         result.is_clear             = true;
@@ -535,6 +550,12 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     // Try to commit to a new viewpoint if we don't have one.
     if (!has_committed_explore_viewpoint_)
     {
+      if (tpm_update_needed_ && tpm_) {
+        tpm_->updateNow();
+        tpm_targets = tpm_->getTargets();
+        tpm_update_needed_ = false;
+      }
+
       // Collect E_OCC / E_FREE targets in priority order (tpm_targets is sorted).
       std::vector<const ScoredTarget*> e_targets;
       for (const auto& t : tpm_targets)
@@ -738,6 +759,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
             has_committed_explore_viewpoint_ = false;
             explore_waypoints_.clear();
             explore_wp_idx_ = 0;
+            tpm_update_needed_ = true;  // updateNow() deferred to next selection phase
             result.is_clear             = true;
             result.pose.pose            = vecToPose(current_state_);
             result.pose.header.stamp    = ros::Time::now();

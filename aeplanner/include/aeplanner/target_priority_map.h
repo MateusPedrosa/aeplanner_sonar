@@ -47,8 +47,12 @@ public:
                     std::shared_mutex& ot_mutex,
                     const TPMParams& params);
 
-  // Timer callback — classifies, clusters, scores, publishes /tpm/targets.
+  // Timer callback — runs updateNow() unless paused.
   void update(const ros::TimerEvent&);
+
+  // Synchronous update called explicitly at episode boundaries (EXPLORE arrival,
+  // DWELL exit). Does not check the pause flag.
+  void updateNow();
 
   // Called by the planner when it deems a target resolved (priority dropped).
   void recordSuccess(const Eigen::Vector3d& pos);
@@ -62,7 +66,9 @@ public:
   // Update the robot position used for map radius query.
   void setRobotPos(const Eigen::Vector3d& pos);
 
-  // Pause/resume the update() timer callback (e.g. during RESOLVE).
+  // Pause/resume the background timer callback.
+  // All committed states (EXPLORE, RESOLVE, DWELL) pause the timer; updates
+  // are driven explicitly via updateNow() at episode boundaries instead.
   void setPaused(bool p) { paused_.store(p, std::memory_order_relaxed); }
 
 private:

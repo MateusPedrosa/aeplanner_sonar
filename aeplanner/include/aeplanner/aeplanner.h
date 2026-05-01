@@ -141,6 +141,10 @@ private:
   std::vector<Eigen::Vector4d> resolve_waypoints_;
   int                          resolve_wp_idx_ = 0;
 
+  // Set at DWELL exit / EXPLORE arrival; consumed at the next selection phase
+  // to trigger a synchronous TPM update before picking the next target.
+  bool tpm_update_needed_ = false;
+
   // Committed viewpoint for EXPLORE state — mirrors RESOLVE variables.
   // No DWELL on arrival; re-evaluates immediately next tick.
   bool                         has_committed_explore_viewpoint_ = false;

@@ -25,8 +25,13 @@ TargetPriorityMap::TargetPriorityMap(
 
 void TargetPriorityMap::update(const ros::TimerEvent&)
 {
-  if (!ot_) return;
   if (paused_.load(std::memory_order_relaxed)) return;
+  updateNow();
+}
+
+void TargetPriorityMap::updateNow()
+{
+  if (!ot_) return;
 
   Eigen::Vector3d robot_pos;
   {
