@@ -124,6 +124,8 @@ void TargetPriorityMap::updateNow()
   ScorerParams sp;
   sp.w_frontier   = params_.w_frontier;
   sp.cluster_norm = params_.cluster_norm;
+  sp.lambda_dist  = params_.lambda_dist;
+  sp.robot_pos    = robot_pos;
 
   std::vector<ScoredTarget> scored = scoreTargets(u_clusters, u_voxels, clusters, sp);
 

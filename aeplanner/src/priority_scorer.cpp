@@ -1,5 +1,6 @@
 #include <aeplanner/priority_scorer.h>
 #include <algorithm>
+#include <cmath>
 
 namespace aeplanner
 {
@@ -21,10 +22,13 @@ std::vector<ScoredTarget> scoreTargets(
       sum_var += u_voxels[idx].var_beta;
     float mean_var = sum_var / (float)uc.member_indices.size();
 
+    double dist_u = (uc.centroid - params.robot_pos).norm();
+    float priority_u = mean_var * static_cast<float>(std::exp(-params.lambda_dist * dist_u));
+
     result.push_back({
       uc.centroid,
       TargetType::U_TARGET,
-      mean_var,
+      priority_u,
       uc.w_normal >= 0.1f ? uc.normal : Eigen::Vector3d::UnitX(),
       uc.w_normal,
       0
@@ -39,9 +43,9 @@ std::vector<ScoredTarget> scoreTargets(
     float density_norm = c.density / (params.cluster_norm + 1e-6f);
     density_norm = std::min(1.0f, density_norm);
 
-    // prior Var_beta for unknown voxels is near max (Beta(prior_A, prior_B))
-    // We use 0 here as placeholder; TPM fills it from the representative voxel.
-    float priority = params.w_frontier * density_norm;
+    double dist_e = (c.centroid - params.robot_pos).norm();
+    float priority = params.w_frontier * density_norm *
+                     static_cast<float>(std::exp(-params.lambda_dist * dist_e));
 
     result.push_back({
       c.centroid,

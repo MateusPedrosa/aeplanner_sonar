@@ -21,8 +21,10 @@ struct ScoredTarget
 
 struct ScorerParams
 {
-  float w_frontier;       // frontier bonus weight (default 0.6)
-  float cluster_norm;     // normalisation for cluster density (default 100.0)
+  float          w_frontier;   // frontier bonus weight (default 0.6)
+  float          cluster_norm; // normalisation for cluster density (default 100.0)
+  double         lambda_dist;  // exponential distance penalty (default 0.2)
+  Eigen::Vector3d robot_pos;   // current robot position
 };
 
 // Merges U-target clusters and frontier clusters into a single scored, sorted list.

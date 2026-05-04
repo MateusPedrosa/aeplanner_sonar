@@ -34,6 +34,7 @@ struct TPMParams
   std::string world_frame; // TF frame for published messages (default "world")
   int    min_cluster_size;   // min voxels per E_TARGET cluster to consider as a target (default 5)
   int    min_u_cluster_size; // min voxels per U_TARGET cluster to consider as a target (default 1)
+  double lambda_dist;        // exponential distance penalty (default 0.2)
 };
 
 // In-process Target Priority Map. Runs as a ros::Timer callback.

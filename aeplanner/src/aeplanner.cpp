@@ -56,6 +56,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   tpm_params.world_frame   = params_.world_frame;
   tpm_params.min_cluster_size   = params_.min_cluster_size;
   tpm_params.min_u_cluster_size = params_.min_u_cluster_size;
+  tpm_params.lambda_dist        = params_.lambda_dist;
 
   tpm_ = std::make_unique<TargetPriorityMap>(nh_, ot_, ot_mutex_, tpm_params);
 
