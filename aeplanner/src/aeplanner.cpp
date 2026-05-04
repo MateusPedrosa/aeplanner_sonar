@@ -631,12 +631,13 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
             }
           }
 
-          if (best_score_ti < 0.0 && tpm_) tpm_->recordFailure(top.pos);
+          if (best_score_ti < params_.min_explore_gain && tpm_) tpm_->recordFailure(top.pos);
         }
 
         if (best_score >= params_.min_explore_gain)
         {
           has_committed_explore_viewpoint_   = true;
+explore_hold_count_                = 0;
           explore_waypoints_.clear();
           explore_wp_idx_ = 0;
           ROS_INFO_STREAM("[EXPLORE] Committed viewpoint ("
@@ -891,6 +892,13 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       }
     }
     // No committed path — hold position and re-evaluate next tick.
+if (++explore_hold_count_ >= kMaxExploreHoldTicks)
+    {
+      ROS_WARN("[EXPLORE] Held for %d ticks with no progress; forcing DONE.",
+               kMaxExploreHoldTicks);
+      explore_hold_count_ = 0;
+      succeed("DONE"); return;
+    }
     result.is_clear             = true;
     result.pose.pose            = vecToPose(current_state_);
     result.pose.header.stamp    = ros::Time::now();

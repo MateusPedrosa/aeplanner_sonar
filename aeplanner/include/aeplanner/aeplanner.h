@@ -151,7 +151,9 @@ private:
   Eigen::Vector4d              committed_explore_viewpoint_;
   ScoredTarget                 committed_explore_target_;
   std::vector<Eigen::Vector4d> explore_waypoints_;
-  int                          explore_wp_idx_ = 0;
+  int                          explore_wp_idx_       = 0;
+  int                          explore_hold_count_   = 0;
+static constexpr int         kMaxExploreHoldTicks  = 10;
 
   // Subscribers
   ros::Subscriber point_sub_;
