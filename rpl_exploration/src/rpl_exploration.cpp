@@ -168,6 +168,7 @@ int main(int argc, char** argv)
           continue;
         }
         ROS_WARN("Exploration complete!");
+        ros::shutdown();
         break;
       }
       for (auto it = aep_ac.getResult()->frontiers.poses.begin();
