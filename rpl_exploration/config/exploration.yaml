@@ -50,4 +50,13 @@ max_z: 50.0
 free_ray_range_weight: false
 tau_var: 0.01
 tau_info: 0.5
+use_pose_level_weighting: false
+pose_history_size: 20
+pose_novelty_sigma: 0.3
+pose_w_roll: 1.0
+pose_w_pitch: 0.6
+pose_w_yaw: 0.05
+pose_w_vx_per_l2: 0.2
+pose_w_vy_per_l2: 0.05
+pose_w_vz_per_l2: 0.5
 

@@ -177,6 +177,42 @@ namespace aeplanner
     if (!ros::param::get("tau_info", params.tau_info)) {
       ROS_WARN_STREAM("No tau_info specified. Default: " << params.tau_info);
     }
+    params.use_pose_level_weighting = false;
+    if (!ros::param::get("use_pose_level_weighting", params.use_pose_level_weighting)) {
+      ROS_WARN_STREAM("No use_pose_level_weighting specified. Default: " << params.use_pose_level_weighting);
+    }
+    params.pose_history_size = 20;
+    if (!ros::param::get("pose_history_size", params.pose_history_size)) {
+      ROS_WARN_STREAM("No pose_history_size specified. Default: " << params.pose_history_size);
+    }
+    params.pose_novelty_sigma = 0.3f;
+    if (!ros::param::get("pose_novelty_sigma", params.pose_novelty_sigma)) {
+      ROS_WARN_STREAM("No pose_novelty_sigma specified. Default: " << params.pose_novelty_sigma);
+    }
+    params.pose_w_roll = 1.0f;
+    if (!ros::param::get("pose_w_roll", params.pose_w_roll)) {
+      ROS_WARN_STREAM("No pose_w_roll specified. Default: " << params.pose_w_roll);
+    }
+    params.pose_w_pitch = 0.6f;
+    if (!ros::param::get("pose_w_pitch", params.pose_w_pitch)) {
+      ROS_WARN_STREAM("No pose_w_pitch specified. Default: " << params.pose_w_pitch);
+    }
+    params.pose_w_yaw = 0.05f;
+    if (!ros::param::get("pose_w_yaw", params.pose_w_yaw)) {
+      ROS_WARN_STREAM("No pose_w_yaw specified. Default: " << params.pose_w_yaw);
+    }
+    params.pose_w_vx_l2 = 0.2f;
+    if (!ros::param::get("pose_w_vx_per_l2", params.pose_w_vx_l2)) {
+      ROS_WARN_STREAM("No pose_w_vx_per_l2 specified. Default: " << params.pose_w_vx_l2);
+    }
+    params.pose_w_vy_l2 = 0.05f;
+    if (!ros::param::get("pose_w_vy_per_l2", params.pose_w_vy_l2)) {
+      ROS_WARN_STREAM("No pose_w_vy_per_l2 specified. Default: " << params.pose_w_vy_l2);
+    }
+    params.pose_w_vz_l2 = 0.5f;
+    if (!ros::param::get("pose_w_vz_per_l2", params.pose_w_vz_l2)) {
+      ROS_WARN_STREAM("No pose_w_vz_per_l2 specified. Default: " << params.pose_w_vz_l2);
+    }
     params.uncertain_threshold = 4.0f;
     if (!ros::param::get("uncertain_threshold", params.uncertain_threshold)) {
       ROS_WARN_STREAM("No uncertain_threshold specified. Default: " << params.uncertain_threshold);

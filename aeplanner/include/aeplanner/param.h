@@ -59,6 +59,15 @@ namespace aeplanner
     bool  free_ray_range_weight;
     float tau_var;
     float tau_info;
+    bool  use_pose_level_weighting;
+    int   pose_history_size;
+    float pose_novelty_sigma;
+    float pose_w_roll;
+    float pose_w_pitch;
+    float pose_w_yaw;
+    float pose_w_vx_l2;
+    float pose_w_vy_l2;
+    float pose_w_vz_l2;
     float uncertain_threshold;
     float free_resolution;
     float ds_resolution;

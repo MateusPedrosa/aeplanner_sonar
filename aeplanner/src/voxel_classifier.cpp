@@ -1,6 +1,8 @@
 #include <aeplanner/voxel_classifier.h>
 #include <unordered_map>
 #include <cmath>
+#include <future>
+#include <thread>
 
 namespace aeplanner
 {
@@ -79,48 +81,71 @@ std::vector<ClassifiedVoxel> classifyExtracted(
     return (it != state_index.end()) ? it->second : la3dm::State::UNKNOWN;
   };
 
-  std::vector<ClassifiedVoxel> result;
-  result.reserve(1024);
+  // Classify in parallel: state_index is read-only after construction, safe for concurrent reads.
+  const size_t N      = leaves.size();
+  const size_t n_jobs = std::min<size_t>(std::thread::hardware_concurrency(), N);
+  const size_t chunk  = (N + n_jobs - 1) / n_jobs;
 
-  for (const LeafEntry& e : leaves)
+  std::vector<std::vector<ClassifiedVoxel>> partial(n_jobs);
+  std::vector<std::future<void>> futures;
+  futures.reserve(n_jobs);
+
+  for (size_t job = 0; job < n_jobs; ++job)
   {
-    const float x = e.pos.x(), y = e.pos.y(), z = e.pos.z();
-
-    // --- U_TARGET: occupied surface voxel with sufficient variance ---
-    if (e.state == la3dm::State::OCCUPIED)
+    const size_t lo = job * chunk;
+    const size_t hi = std::min(lo + chunk, N);
+    futures.push_back(std::async(std::launch::async, [&, lo, hi, job]()
     {
-      if (e.var < sigma2_thresh) continue;
-      bool adj_free = false;
-      for (int i = 0; i < 6 && !adj_free; ++i)
+      std::vector<ClassifiedVoxel>& out = partial[job];
+      for (size_t i = lo; i < hi; ++i)
       {
-        if (neighborState(x + kNeighbourOffsets[i][0] * e.size,
-                          y + kNeighbourOffsets[i][1] * e.size,
-                          z + kNeighbourOffsets[i][2] * e.size) == la3dm::State::FREE)
-          adj_free = true;
+        const LeafEntry& e = leaves[i];
+        const float x = e.pos.x(), y = e.pos.y(), z = e.pos.z();
+
+        if (e.state == la3dm::State::OCCUPIED)
+        {
+          if (e.var < sigma2_thresh) continue;
+          bool adj_free = false;
+          for (int k = 0; k < 6 && !adj_free; ++k)
+          {
+            if (neighborState(x + kNeighbourOffsets[k][0] * e.size,
+                              y + kNeighbourOffsets[k][1] * e.size,
+                              z + kNeighbourOffsets[k][2] * e.size) == la3dm::State::FREE)
+              adj_free = true;
+          }
+          if (adj_free)
+            out.push_back({Eigen::Vector3d(x, y, z), TargetType::U_TARGET, e.var});
+          continue;
+        }
+
+        if (e.state != la3dm::State::UNKNOWN) continue;
+
+        bool adj_occ = false, adj_free = false;
+        for (int k = 0; k < 6; ++k)
+        {
+          la3dm::State ns = neighborState(x + kNeighbourOffsets[k][0] * e.size,
+                                          y + kNeighbourOffsets[k][1] * e.size,
+                                          z + kNeighbourOffsets[k][2] * e.size);
+          if (ns == la3dm::State::OCCUPIED) adj_occ  = true;
+          if (ns == la3dm::State::FREE)     adj_free = true;
+          if (adj_occ && adj_free) break;
+        }
+
+        if (!adj_occ && !adj_free) continue;
+
+        TargetType type = adj_occ ? TargetType::E_OCC : TargetType::E_FREE;
+        out.push_back({Eigen::Vector3d(x, y, z), type, e.var});
       }
-      if (adj_free)
-        result.push_back({Eigen::Vector3d(x, y, z), TargetType::U_TARGET, e.var});
-      continue;
-    }
+    }));
+  }
 
-    // --- E-targets: unknown voxels adjacent to known voxels ---
-    if (e.state != la3dm::State::UNKNOWN) continue;
-
-    bool adj_occ = false, adj_free = false;
-    for (int i = 0; i < 6; ++i)
-    {
-      la3dm::State ns = neighborState(x + kNeighbourOffsets[i][0] * e.size,
-                                      y + kNeighbourOffsets[i][1] * e.size,
-                                      z + kNeighbourOffsets[i][2] * e.size);
-      if (ns == la3dm::State::OCCUPIED) adj_occ  = true;
-      if (ns == la3dm::State::FREE)     adj_free = true;
-      if (adj_occ && adj_free) break;
-    }
-
-    if (!adj_occ && !adj_free) continue;
-
-    TargetType type = adj_occ ? TargetType::E_OCC : TargetType::E_FREE;
-    result.push_back({Eigen::Vector3d(x, y, z), type, e.var});
+  std::vector<ClassifiedVoxel> result;
+  result.reserve(N / 4);
+  for (size_t job = 0; job < n_jobs; ++job)
+  {
+    futures[job].wait();
+    auto& p = partial[job];
+    result.insert(result.end(), p.begin(), p.end());
   }
 
   return result;

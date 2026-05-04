@@ -1,5 +1,7 @@
 #include <aeplanner/aeplanner.h>
 #include <tf2/utils.h>
+#include <future>
+#include <queue>
 
 namespace aeplanner
 {
@@ -22,6 +24,13 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
 
   la3dm::OcTreeNode::tau_var  = params_.tau_var;
   la3dm::OcTreeNode::tau_info = params_.tau_info;
+
+  ot_->configure_pose_level_weighting(
+      params_.use_pose_level_weighting,
+      params_.pose_history_size,
+      params_.pose_novelty_sigma,
+      params_.pose_w_roll, params_.pose_w_pitch, params_.pose_w_yaw,
+      params_.pose_w_vx_l2, params_.pose_w_vy_l2, params_.pose_w_vz_l2);
 
   m_pub_occ_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/occupied_cells_vis_array", params_.resolution);
   // m_pub_free_ = new la3dm::MarkerArrayPub(nh_, "/bgkloctomap/free_cells_vis_array", params_.resolution);
@@ -188,9 +197,16 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     if (!has_committed_viewpoint_)
     {
       if (tpm_update_needed_ && tpm_) {
-        tpm_->updateNow();
+        // Run TPM update and priority cache concurrently — both use shared_lock only.
+        priority_cache_valid_ = false;
+        auto tpm_fut = std::async(std::launch::async, [this]{ tpm_->updateNow(); });
+        computePriorityCache();
+        tpm_fut.wait();
         tpm_targets = tpm_->getTargets();
         tpm_update_needed_ = false;
+      } else {
+        priority_cache_valid_ = false;
+        computePriorityCache();
       }
 
       if (tpm_targets.empty())
@@ -201,11 +217,6 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         result.pose.header.frame_id = params_.world_frame;
         succeed("RESOLVE_HOLD"); return;
       }
-
-      // Build priority cache once per selection episode — it is robot-position-based,
-      // not target-specific, so one build covers all targets in the loop below.
-      priority_cache_valid_ = false;
-      computePriorityCache();
 
       int winning_ti = -1;
       double winning_best_score = -1.0;
@@ -1083,28 +1094,38 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
 
 void AEPlanner::computePriorityCache()
 {
-  // Step 1 of PDF §7: rank voxels by priority = Var_beta × directional_imbalance.
   // Skip rebuild if the robot hasn't moved significantly — the leaf iteration
-  // under shared_lock is O(N_all_leaves_in_sphere) and grows as FREE voxels
-  // accumulate from sonar sweeps. A 1.5 m threshold is well below r_max so the
-  // visible set barely changes, but the rebuild rate drops to once per 1.5 m of
-  // travel rather than once per execute() tick.
+  // under shared_lock is O(N_leaves_in_sphere) and grows as FREE voxels accumulate.
   constexpr double kRebuildDist = 1.5;
   if (priority_cache_valid_ &&
       (current_state_.head<3>() - priority_cache_built_pos_).norm() < kRebuildDist)
     return;
 
-  priority_cache_.clear();
-
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
 
-  // Use the robot's current base position as the fixed planning origin.
   la3dm::point3f t_plan_p3f((float)current_state_[0],
                              (float)current_state_[1],
                              (float)current_state_[2]);
   Eigen::Vector3d t_plan(current_state_[0], current_state_[1], current_state_[2]);
 
-  priority_cache_.reserve(4096);
+  const int K = params_.nbv_k;
+
+  // Staging entry: raw data needed to compute eigenstruct after the lock is released.
+  // Storing info[6] (24 bytes) is far cheaper than calling get_2d_eigenstruct() for
+  // every voxel when only K of the ~3M candidates will survive.
+  struct StagedVoxel {
+    Eigen::Vector3d pos;
+    float           priority;
+    float           info[6];
+    bool operator>(const StagedVoxel& o) const { return priority > o.priority; }
+  };
+
+  // Min-heap capped at K: top() is the weakest survivor.
+  // A new voxel enters only if it beats the current minimum, so the heap never
+  // holds more than K entries — no large vector, no realloc.
+  std::priority_queue<StagedVoxel,
+                      std::vector<StagedVoxel>,
+                      std::greater<StagedVoxel>> heap;
 
   ros::WallTime t_cache_lock_start = ros::WallTime::now();
   {
@@ -1115,50 +1136,61 @@ void AEPlanner::computePriorityCache()
          it != ot->end_leaf(); ++it)
     {
       la3dm::OcTreeNode &node = it.get_node();
-
       if (!node.has_active_info_matrix()) continue;
 
       la3dm::point3f p_loc = it.get_loc();
       Eigen::Vector3d p_k(p_loc.x(), p_loc.y(), p_loc.z());
 
       Eigen::Vector3d diff = p_k - t_plan;
-      double dist = diff.norm();
-      if (dist < 1e-6) continue;
-
-      la3dm::point3f los_p3f((float)(diff.x()/dist),
-                             (float)(diff.y()/dist),
-                             (float)(diff.z()/dist));
+      if (diff.squaredNorm() < 1e-12) continue;
 
       float priority = node.get_var();
       if (priority < 1e-8f) continue;
 
-      float lam1_unused, lam2_unused;
-      la3dm::point3f v_weak_p3f;
-      node.get_2d_eigenstruct(los_p3f, lam1_unused, lam2_unused, v_weak_p3f);
-
-      priority_cache_.push_back({p_k, priority,
-                                 Eigen::Vector3d(v_weak_p3f.x(), v_weak_p3f.y(), v_weak_p3f.z())});
+      if ((int)heap.size() < K) {
+        StagedVoxel sv;
+        sv.pos      = p_k;
+        sv.priority = priority;
+        node.get_info(sv.info);
+        heap.push(sv);
+      } else if (priority > heap.top().priority) {
+        StagedVoxel sv;
+        sv.pos      = p_k;
+        sv.priority = priority;
+        node.get_info(sv.info);
+        heap.pop();
+        heap.push(sv);
+      }
     }
+
     ros::WallTime t_cache_done = ros::WallTime::now();
     ROS_WARN_THROTTLE(5.0,
-      "[CACHE_TIMING] lock_wait=%.3fs  lock_held=%.3fs  voxels_found=%zu",
-      (t_cache_locked     - t_cache_lock_start).toSec(),
-      (t_cache_done       - t_cache_locked).toSec(),
-      priority_cache_.size());
-  } // shared_lock released — map read complete
+      "[CACHE_TIMING] lock_wait=%.3fs  lock_held=%.3fs  heap_size=%zu",
+      (t_cache_locked - t_cache_lock_start).toSec(),
+      (t_cache_done   - t_cache_locked).toSec(),
+      heap.size());
+  } // shared_lock released
 
-  // Top-K selection does not access the map; run without holding the lock.
-  int K = params_.nbv_k;
-  if ((int)priority_cache_.size() > K) {
-    std::nth_element(priority_cache_.begin(), priority_cache_.begin() + K,
-                     priority_cache_.end(),
-                     [](const PriorityVoxel &a, const PriorityVoxel &b) {
-                       return a.priority > b.priority;
-                     });
-    priority_cache_.resize(K);
+  // Compute eigenstruct for the K survivors only — lock-free, trivial cost.
+  priority_cache_.clear();
+  priority_cache_.reserve(heap.size());
+  while (!heap.empty()) {
+    const StagedVoxel& sv = heap.top();
+    Eigen::Vector3d diff = sv.pos - t_plan;
+    double dist = diff.norm();
+    la3dm::point3f los_p3f((float)(diff.x()/dist),
+                           (float)(diff.y()/dist),
+                           (float)(diff.z()/dist));
+    float lam1_unused, lam2_unused;
+    la3dm::point3f v_weak_p3f;
+    la3dm::Occupancy::compute_2d_eigenstruct_raw(sv.info, los_p3f,
+                                                 lam1_unused, lam2_unused, v_weak_p3f);
+    priority_cache_.push_back({sv.pos, sv.priority,
+                               Eigen::Vector3d(v_weak_p3f.x(), v_weak_p3f.y(), v_weak_p3f.z())});
+    heap.pop();
   }
 
-  priority_cache_valid_    = true;
+  priority_cache_valid_     = true;
   priority_cache_built_pos_ = current_state_.head<3>();
   ROS_DEBUG_STREAM("computePriorityCache: " << priority_cache_.size()
                    << " priority voxels (r_max=" << params_.r_max << ")");
@@ -1419,7 +1451,9 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   auto t_prepare_start = ros::WallTime::now();
   auto prepared = ot_->prepare_pointcloud_update(
       *pcl_cloud, origin, sensor_up,
-      params_.ds_resolution, params_.free_resolution, params_.r_max);
+      params_.ds_resolution, params_.free_resolution, params_.r_max,
+      (float)orientation.x(), (float)orientation.y(),
+      (float)orientation.z(), (float)orientation.w());
 
   if (prepared.empty) return;
 
