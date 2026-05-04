@@ -219,11 +219,15 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         succeed("RESOLVE_HOLD"); return;
       }
 
-      int winning_ti = -1;
-      double winning_best_score = -1.0;
+      const int resolve_k     = std::min(params_.resolve_k, (int)tpm_targets.size());
+      const int n_per_resolve = std::max(1, params_.N_samples / resolve_k);
+
+      int             winning_ti         = -1;
+      double          winning_best_score = -1.0;
+      Eigen::Vector4d winning_viewpoint;
       std::vector<std::pair<Eigen::Vector4d, double>> scored_candidates;
 
-      for (int ti = 0; ti < static_cast<int>(tpm_targets.size()); ++ti)
+      for (int ti = 0; ti < resolve_k; ++ti)
       {
         const ScoredTarget& top = tpm_targets[ti];
 
@@ -233,11 +237,13 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
             ? static_cast<DirectedSampler*>(frontier_sampler_.get())
             : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
 
-        auto candidates = sampler->sampleCandidates(top, current_state_, ot_, params_);
+        Params local_p    = params_;
+        local_p.N_samples = n_per_resolve;
+        auto candidates   = sampler->sampleCandidates(top, current_state_, ot_, local_p);
 
-        double best_score   = -1.0;
-        int    n_valid_cands = 0;
-        std::vector<std::pair<Eigen::Vector4d, double>> cands_this_target;
+        double best_score_ti = -1.0;
+        Eigen::Vector4d best_vp_ti;
+        int n_valid_cands = 0;
 
         for (const CandidatePose& cp : candidates)
         {
@@ -252,29 +258,36 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           auto [gain, yaw] = gainCubature(cp.state);
           double dist  = (cp.state.head<3>() - current_state_.head<3>()).norm();
           double score = gain * std::exp(-params_.lambda_dist * dist);
-          cands_this_target.push_back({cp.state, score});
-          if (score > best_score)
+          scored_candidates.push_back({cp.state, score});
+          if (score > best_score_ti)
           {
-            best_score           = score;
-            committed_viewpoint_ = cp.state;
+            best_score_ti = score;
+            best_vp_ti    = cp.state;
           }
         }
 
-        if (n_valid_cands == 0 || best_score <= 0.0)
+        if (n_valid_cands == 0 || best_score_ti <= 0.0)
         {
           ROS_WARN_STREAM("[RESOLVE] Target #" << ti
               << " (" << top.pos.transpose() << ") — "
               << (n_valid_cands == 0 ? "no valid candidates" : "all zero gain")
-              << "; recording failure, trying next target.");
+              << "; recording failure.");
           if (tpm_) tpm_->recordFailure(top.pos);
           continue;
         }
 
-        // Found a viable target — commit to it.
-        winning_ti         = ti;
-        winning_best_score = best_score;
-        scored_candidates  = std::move(cands_this_target);
-        committed_target_        = top;
+        if (best_score_ti > winning_best_score)
+        {
+          winning_ti         = ti;
+          winning_best_score = best_score_ti;
+          winning_viewpoint  = best_vp_ti;
+        }
+      }
+
+      if (winning_ti >= 0)
+      {
+        committed_viewpoint_     = winning_viewpoint;
+        committed_target_        = tpm_targets[winning_ti];
         has_committed_viewpoint_ = true;
         state_machine_->enterResolveCommitment();
         resolve_waypoints_.clear();
@@ -283,14 +296,13 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           << committed_viewpoint_[0] << ", " << committed_viewpoint_[1]
           << ", " << committed_viewpoint_[2]
           << ") yaw=" << (committed_viewpoint_[3] * 180.0 / M_PI) << " deg"
-          << "  score=" << best_score
-          << "  (target #" << ti << " of " << tpm_targets.size() << ")");
-        break;
+          << "  score=" << winning_best_score
+          << "  (target #" << winning_ti << " of top-" << resolve_k << ")");
       }
 
       if (winning_ti < 0)
       {
-        ROS_WARN_STREAM("[RESOLVE] All " << tpm_targets.size()
+        ROS_WARN_STREAM("[RESOLVE] All top-" << resolve_k
             << " targets exhausted — no positive-gain candidates. Holding position.");
         result.is_clear             = true;
         result.pose.pose            = vecToPose(current_state_);
@@ -576,41 +588,54 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
       if (!e_targets.empty())
       {
-        const ScoredTarget& top = *e_targets[0];
-
-        DirectedSampler* sampler =
-            (top.type == TargetType::E_FREE &&
-             top.w_normal < params_.w_normal_thresh)
-            ? static_cast<DirectedSampler*>(frontier_sampler_.get())
-            : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
-
-        auto candidates = sampler->sampleCandidates(top, current_state_, ot_, params_);
+        const int explore_k     = std::min(params_.resolve_k, (int)e_targets.size());
+        const int n_per_explore = std::max(1, params_.N_samples / explore_k);
 
         priority_cache_valid_ = false;
         computePriorityCache();
 
         double best_score = -1.0;
         std::vector<std::pair<Eigen::Vector4d, double>> scored_candidates;
-        for (const CandidatePose& cp : candidates)
+
+        for (int ti = 0; ti < explore_k; ++ti)
         {
-          if (!isInsideBoundaries(cp.state)) continue;
-          if (planning_snapshot_.occupied(
-                  static_cast<float>(cp.state[0]),
-                  static_cast<float>(cp.state[1]),
-                  static_cast<float>(cp.state[2]))) continue;
-          double dist  = (cp.state.head<3>() - current_state_.head<3>()).norm();
-          double score = gainExploration(cp.state) * std::exp(-params_.lambda_dist * dist);
-          scored_candidates.push_back({cp.state, score});
-          if (score > best_score)
+          const ScoredTarget& top = *e_targets[ti];
+
+          DirectedSampler* sampler =
+              (top.type == TargetType::E_FREE &&
+               top.w_normal < params_.w_normal_thresh)
+              ? static_cast<DirectedSampler*>(frontier_sampler_.get())
+              : static_cast<DirectedSampler*>(hemisphere_sampler_.get());
+
+          Params local_p    = params_;
+          local_p.N_samples = n_per_explore;
+          auto candidates   = sampler->sampleCandidates(top, current_state_, ot_, local_p);
+
+          double best_score_ti = -1.0;
+          for (const CandidatePose& cp : candidates)
           {
-            best_score                   = score;
-            committed_explore_viewpoint_ = cp.state;
+            if (!isInsideBoundaries(cp.state)) continue;
+            if (planning_snapshot_.occupied(
+                    static_cast<float>(cp.state[0]),
+                    static_cast<float>(cp.state[1]),
+                    static_cast<float>(cp.state[2]))) continue;
+            double dist  = (cp.state.head<3>() - current_state_.head<3>()).norm();
+            double score = gainExploration(cp.state) * std::exp(-params_.lambda_dist * dist);
+            scored_candidates.push_back({cp.state, score});
+            if (score > best_score_ti) best_score_ti = score;
+            if (score > best_score)
+            {
+              best_score                   = score;
+              committed_explore_viewpoint_ = cp.state;
+              committed_explore_target_    = top;
+            }
           }
+
+          if (best_score_ti < 0.0 && tpm_) tpm_->recordFailure(top.pos);
         }
 
         if (best_score >= params_.min_explore_gain)
         {
-          committed_explore_target_          = top;
           has_committed_explore_viewpoint_   = true;
           explore_waypoints_.clear();
           explore_wp_idx_ = 0;
@@ -695,10 +720,8 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         }
         else if (best_score < 0.0)
         {
-          // No geometrically valid candidate at all — record failure so the
-          // blacklist eventually removes this target if it stays unreachable.
-          ROS_WARN("[EXPLORE] No valid candidate for E-target; recording failure.");
-          if (tpm_) tpm_->recordFailure(top.pos);
+          // Failures already recorded per-target inside the sampling loop above.
+          ROS_WARN("[EXPLORE] No valid candidate for any E-target; holding.");
         }
         else
         {

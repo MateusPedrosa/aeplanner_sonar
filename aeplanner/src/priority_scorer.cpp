@@ -20,10 +20,10 @@ std::vector<ScoredTarget> scoreTargets(
     float sum_var = 0.0f;
     for (size_t idx : uc.member_indices)
       sum_var += u_voxels[idx].var_beta;
-    float mean_var = sum_var / (float)uc.member_indices.size();
 
     double dist_u = (uc.centroid - params.robot_pos).norm();
-    float priority_u = mean_var * static_cast<float>(std::exp(-params.lambda_dist * dist_u));
+    float priority_u = (sum_var / (params.cluster_norm + 1e-6f)) *
+                       static_cast<float>(std::exp(-params.lambda_dist * dist_u));
 
     result.push_back({
       uc.centroid,

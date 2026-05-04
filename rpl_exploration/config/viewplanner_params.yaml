@@ -18,10 +18,11 @@ viewplanner:
   local_radius:        10.0    # Radius of "local volume" for EXPLORE vs REPOSITION (m)
 
   # Pose scoring and sampling
-  lambda_dist:         0.5     # Exponential distance penalty: score *= exp(-lambda_dist * dist)
+  lambda_dist:         0.75     # Exponential distance penalty: score *= exp(-lambda_dist * dist)
   d_standoff:          4.0     # Nominal sonar standoff for viewpoint placement (m)
   R_sample:            8.0     # Hemisphere sampling radius around target (m)
-  N_samples:           50      # Hemisphere pose samples per target
+  N_samples:           50      # Total hemisphere pose samples spread across resolve_k targets
+  resolve_k:           3       # Number of top-priority targets to spread sampling across
 
   # DWELL state
   T_dwell:             3.0    # Max hold time before DWELL timeout (s)

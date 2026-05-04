@@ -279,6 +279,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/N_samples", params.N_samples)) {
       ROS_WARN_STREAM("No viewplanner/N_samples specified. Default: " << params.N_samples);
     }
+    params.resolve_k = 3;
+    if (!ros::param::get(ns + "/viewplanner/resolve_k", params.resolve_k)) {
+      ROS_WARN_STREAM("No viewplanner/resolve_k specified. Default: " << params.resolve_k);
+    }
     params.T_dwell = 15.0;
     if (!ros::param::get(ns + "/viewplanner/T_dwell", params.T_dwell)) {
       ROS_WARN_STREAM("No viewplanner/T_dwell specified. Default: " << params.T_dwell);

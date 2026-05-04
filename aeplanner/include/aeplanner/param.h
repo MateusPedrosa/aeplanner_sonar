@@ -87,6 +87,7 @@ namespace aeplanner
     double d_standoff;          // nominal sonar standoff distance in metres (default 4.0)
     double R_sample;            // hemisphere sampling radius (default 8.0)
     int    N_samples;           // hemisphere samples per target (default 50)
+    int    resolve_k;           // top-K targets to spread sampling across (default 3)
     double T_dwell;             // DWELL timeout seconds (default 15.0)
     int    N_fail;              // consecutive failures before blacklisting (default 3)
     double T_cooldown;          // blacklist cooldown seconds (default 30.0)

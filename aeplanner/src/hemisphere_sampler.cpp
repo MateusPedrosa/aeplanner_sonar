@@ -51,8 +51,10 @@ std::vector<CandidatePose> HemisphereSampler::sampleCandidates(
 
   for (int i = 0; i < N; ++i)
   {
-    // Cosine-weighted sampling: theta = acos(uniform(0,1)), phi = uniform(0,2π)
-    double theta = std::acos(((double)rand() / (double)RAND_MAX));
+    // Cosine-weighted sampling clamped to sensor vfov cone
+    double cos_max = std::cos(params.vfov);
+    double theta   = std::acos(cos_max + (1.0 - cos_max) *
+                               ((double)rand() / (double)RAND_MAX));
     double phi   = 2.0 * M_PI * ((double)rand() / (double)RAND_MAX);
 
     Eigen::Vector3d p_cand = p_center + R_sample * sphericalToCart(theta, phi, normal);
