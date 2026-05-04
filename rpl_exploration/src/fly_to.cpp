@@ -33,7 +33,8 @@ namespace rpl_exploration {
         geometry_msgs::Point p = goal->pose.pose.position;
 
         float distance_to_goal = 9001; // Distance is over 9000
-        float yaw_diff = M_PI;
+        float yaw_diff  = M_PI;
+        float roll_diff = M_PI;
 
         tf::StampedTransform transform;
         transform.setOrigin( tf::Vector3(0.0, 0.0, 0.0) );
@@ -45,8 +46,8 @@ namespace rpl_exploration {
           goal->pose.pose.orientation.z,
           goal->pose.pose.orientation.w);
         tf::Matrix3x3 m(gq);
-        double roll, pitch, goal_yaw;
-        m.getRPY(roll, pitch, goal_yaw);
+        double goal_roll, pitch, goal_yaw;
+        m.getRPY(goal_roll, pitch, goal_yaw);
 
         // Publish the goal exact once to the nbv_setpoint topic
         geometry_msgs::PoseStamped nbv_pose = goal->pose;
@@ -78,8 +79,8 @@ namespace rpl_exploration {
           tq.w = (float)transform.getRotation().w();
           tf::Quaternion cq( tq.x, tq.y, tq.z, tq.w);
           tf::Matrix3x3 m(cq);
-          double current_yaw;
-          m.getRPY(roll, pitch, current_yaw);
+          double current_roll, current_pitch, current_yaw;
+          m.getRPY(current_roll, current_pitch, current_yaw);
 
           ROS_INFO_STREAM("Current position: (" << q.x << ", " << q.y << ", " << q.z << ") ");
           geometry_msgs::Point d; 
@@ -89,10 +90,11 @@ namespace rpl_exploration {
 
           distance_to_goal = sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
           ROS_INFO_STREAM("Distance to goal: " << distance_to_goal);
-          yaw_diff = fabs(atan2(sin(goal_yaw-current_yaw), cos(goal_yaw-current_yaw)));
+          yaw_diff  = fabs(atan2(sin(goal_yaw  - current_yaw),  cos(goal_yaw  - current_yaw)));
+          roll_diff = fabs(atan2(sin(goal_roll - current_roll), cos(goal_roll - current_roll)));
 
           r.sleep();
-        } while(distance_to_goal > 0.5 or yaw_diff > (1.0/6.0)*M_PI);
+        } while(distance_to_goal > 0.2 or yaw_diff > (1.0/18.0)*M_PI or roll_diff > (1.0/18.0)*M_PI);
 
 
         as->setSucceeded();

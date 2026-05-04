@@ -328,6 +328,24 @@ namespace aeplanner
       ROS_WARN_STREAM("No viewplanner/resolve_face_target specified. Default: " << params.resolve_face_target);
     }
 
+    // --- Sonar roll handling in gainCubature ---
+    params.n_roll_samples = 0;
+    if (!ros::param::get(ns + "/viewplanner/n_roll_samples", params.n_roll_samples)) {
+      ROS_WARN_STREAM("No viewplanner/n_roll_samples specified. Default: " << params.n_roll_samples);
+    }
+    params.roll_amplitude = M_PI / 4.0;
+    if (!ros::param::get(ns + "/viewplanner/roll_amplitude", params.roll_amplitude)) {
+      ROS_WARN_STREAM("No viewplanner/roll_amplitude specified. Default: " << params.roll_amplitude);
+    }
+    params.sample_robot_roll = false;
+    if (!ros::param::get(ns + "/viewplanner/sample_robot_roll", params.sample_robot_roll)) {
+      ROS_WARN_STREAM("No viewplanner/sample_robot_roll specified. Default: " << params.sample_robot_roll);
+    }
+    params.robot_roll_amplitude = M_PI / 4.0;
+    if (!ros::param::get(ns + "/viewplanner/robot_roll_amplitude", params.robot_roll_amplitude)) {
+      ROS_WARN_STREAM("No viewplanner/robot_roll_amplitude specified. Default: " << params.robot_roll_amplitude);
+    }
+
     // --- Exploration gain parameters ---
     params.n_explore_rays_az = 15;
     if (!ros::param::get(ns + "/viewplanner/n_explore_rays_az", params.n_explore_rays_az)) {

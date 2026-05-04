@@ -100,6 +100,12 @@ namespace aeplanner
     int    min_u_cluster_size;  // min voxels per U_TARGET cluster to be considered a target (default 1)
     bool   resolve_face_target; // true = face target while traveling in RESOLVE; false = face direction of travel (default true)
 
+    // --- Sonar roll handling in gainCubature ---
+    int    n_roll_samples;         // 0 = rest-position only; N = average over N servo angles (default 0)
+    double roll_amplitude;         // servo half-swing in radians (default π/4 = 45°)
+    bool   sample_robot_roll;      // true = 5-DOF sampling: robot banks, servo at rest (default false)
+    double robot_roll_amplitude;   // robot roll half-range in radians (default π/4 = 45°)
+
     // --- Exploration gain parameters ---
     int    n_explore_rays_az;     // azimuth ray count for gainExploration (default 15)
     int    n_explore_rays_el;     // elevation ray count for gainExploration (default 4)

@@ -36,3 +36,15 @@ viewplanner:
 
   # TPM
   tpm_rate:            0.5     # TPM update frequency (Hz)
+
+  # Sonar roll handling in gainCubature
+  # Option 1 (always active): rest-position transform is cached at first TF lookup.
+  # Option 2: set n_roll_samples > 1 to average alignment over N servo angles in [-roll_amplitude, +roll_amplitude].
+  #           0 or 1 = rest-position only (no integration). Occlusion is computed once per voxel.
+  # Option 3: set sample_robot_roll=true to have the robot bank instead of the servo rolling.
+  #           Robot roll is sampled uniformly in [-robot_roll_amplitude, +robot_roll_amplitude].
+  #           Compatible with Option 2 (servo integration applied on top of each robot roll sample).
+  n_roll_samples:        0       # 0=rest only, N>1 = N-angle servo roll integration
+  roll_amplitude:        0.785   # Servo half-swing in radians (default π/4 = 45°)
+  sample_robot_roll:     false   # true = 5-DOF robot banking (x,y,z,yaw,roll)
+  robot_roll_amplitude:  0.785   # Robot roll half-range in radians (default π/4 = 45°)

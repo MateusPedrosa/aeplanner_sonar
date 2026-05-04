@@ -12,8 +12,9 @@ namespace aeplanner
 
 struct CandidatePose
 {
-  Eigen::Vector4d state;  // (x, y, z, yaw)
+  Eigen::Vector4d state;     // (x, y, z, yaw)
   double          score;
+  double          roll = 0.0;  // robot roll angle used for 5-DOF sampling (Option 3)
 };
 
 class DirectedSampler

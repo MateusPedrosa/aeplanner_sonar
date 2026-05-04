@@ -5,6 +5,46 @@
 
 namespace aeplanner
 {
+
+// Publish a 3-axis (RGB = XYZ) frame into viz, using base_id … base_id+2.
+// Uses the two-point ARROW form so direction comes from the quaternion, not pose.
+static void addFrameMarkers(
+    visualization_msgs::MarkerArray& viz,
+    const std::string& ns, int base_id,
+    const std::string& frame_id,
+    double x, double y, double z,
+    const tf::Quaternion& q,
+    double len, float alpha,
+    ros::Duration lifetime = ros::Duration(0))
+{
+  static const float kColors[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+  static const tf::Vector3 kAxes[3] = {
+    tf::Vector3(1,0,0), tf::Vector3(0,1,0), tf::Vector3(0,0,1)
+  };
+  tf::Matrix3x3 rot(q);
+  for (int i = 0; i < 3; ++i)
+  {
+    tf::Vector3 dir = rot * kAxes[i];
+    visualization_msgs::Marker m;
+    m.header.frame_id = frame_id;
+    m.header.stamp    = ros::Time::now();
+    m.ns     = ns;
+    m.id     = base_id + i;
+    m.type   = visualization_msgs::Marker::ARROW;
+    m.action = visualization_msgs::Marker::ADD;
+    geometry_msgs::Point start, end;
+    start.x = x;               start.y = y;               start.z = z;
+    end.x   = x + len * dir.x(); end.y = y + len * dir.y(); end.z = z + len * dir.z();
+    m.points.push_back(start);
+    m.points.push_back(end);
+    m.scale.x = len * 0.08;   // shaft diameter
+    m.scale.y = len * 0.15;   // head diameter
+    m.color.r = kColors[i][0]; m.color.g = kColors[i][1]; m.color.b = kColors[i][2];
+    m.color.a = alpha;
+    m.lifetime = lifetime;
+    viz.markers.push_back(m);
+  }
+}
 AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   : nh_(nh)
   , as_(nh_, "make_plan", boost::bind(&AEPlanner::execute, this, _1), false)
@@ -225,7 +265,8 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       int             winning_ti         = -1;
       double          winning_best_score = -1.0;
       Eigen::Vector4d winning_viewpoint;
-      std::vector<std::pair<Eigen::Vector4d, double>> scored_candidates;
+      double          winning_roll       = 0.0;
+      std::vector<CandidatePose> scored_candidates;
 
       for (int ti = 0; ti < resolve_k; ++ti)
       {
@@ -243,6 +284,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 
         double best_score_ti = -1.0;
         Eigen::Vector4d best_vp_ti;
+        double best_roll_ti = 0.0;
         int n_valid_cands = 0;
 
         for (const CandidatePose& cp : candidates)
@@ -255,14 +297,15 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
               continue;
           }
           n_valid_cands++;
-          auto [gain, yaw] = gainCubature(cp.state);
+          auto [gain, yaw] = gainCubature(cp.state, cp.roll);
           double dist  = (cp.state.head<3>() - current_state_.head<3>()).norm();
           double score = gain * std::exp(-params_.lambda_dist * dist);
-          scored_candidates.push_back({cp.state, score});
+          scored_candidates.push_back({cp.state, score, cp.roll});
           if (score > best_score_ti)
           {
             best_score_ti = score;
             best_vp_ti    = cp.state;
+            best_roll_ti  = cp.roll;
           }
         }
 
@@ -281,14 +324,16 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           winning_ti         = ti;
           winning_best_score = best_score_ti;
           winning_viewpoint  = best_vp_ti;
+          winning_roll       = best_roll_ti;
         }
       }
 
       if (winning_ti >= 0)
       {
-        committed_viewpoint_     = winning_viewpoint;
-        committed_target_        = tpm_targets[winning_ti];
-        has_committed_viewpoint_ = true;
+        committed_viewpoint_      = winning_viewpoint;
+        committed_viewpoint_roll_ = winning_roll;
+        committed_target_         = tpm_targets[winning_ti];
+        has_committed_viewpoint_  = true;
         state_machine_->enterResolveCommitment();
         resolve_waypoints_.clear();
         resolve_wp_idx_ = 0;
@@ -296,6 +341,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           << committed_viewpoint_[0] << ", " << committed_viewpoint_[1]
           << ", " << committed_viewpoint_[2]
           << ") yaw=" << (committed_viewpoint_[3] * 180.0 / M_PI) << " deg"
+          << "  roll=" << (committed_viewpoint_roll_ * 180.0 / M_PI) << " deg"
           << "  score=" << winning_best_score
           << "  (target #" << winning_ti << " of top-" << resolve_k << ")");
       }
@@ -320,9 +366,9 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         del.action = visualization_msgs::Marker::DELETEALL;
         viz.markers.push_back(del);
 
-        // Candidate viewpoints — yellow arrows scaled by score
+        // Candidate viewpoints — yellow arrows scaled by score, roll included in orientation
         int cand_id = 0;
-        for (const auto& [state, score] : scored_candidates)
+        for (const auto& cp : scored_candidates)
         {
           visualization_msgs::Marker m;
           m.header.stamp    = ros::Time::now();
@@ -331,13 +377,17 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           m.id = cand_id++;
           m.type   = visualization_msgs::Marker::ARROW;
           m.action = visualization_msgs::Marker::ADD;
-          m.pose.position.x = state[0];
-          m.pose.position.y = state[1];
-          m.pose.position.z = state[2];
-          tf::Quaternion cq; cq.setEuler(0.0, 0.0, state[3]);
+          m.pose.position.x = cp.state[0];
+          m.pose.position.y = cp.state[1];
+          m.pose.position.z = cp.state[2];
+          tf::Quaternion cq; cq.setEuler(0.0, 0.0, cp.state[3]);
+          if (cp.roll != 0.0) {
+            tf::Quaternion rq; rq.setEuler(0.0, cp.roll, 0.0);
+            cq = cq * rq;
+          }
           m.pose.orientation.x = cq.x(); m.pose.orientation.y = cq.y();
           m.pose.orientation.z = cq.z(); m.pose.orientation.w = cq.w();
-          double rel = score / winning_best_score;
+          double rel = cp.score / winning_best_score;
           m.scale.x = std::max(rel * 1.5, 0.1);
           m.scale.y = 0.12; m.scale.z = 0.12;
           m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 0.8;
@@ -345,24 +395,16 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
           viz.markers.push_back(m);
         }
 
-        // Committed viewpoint — large green arrow
+        // Committed viewpoint — 3-axis frame (R=X, G=Y, B=Z) showing full orientation with roll
         {
-          visualization_msgs::Marker m;
-          m.header.stamp    = ros::Time::now();
-          m.header.frame_id = params_.world_frame;
-          m.ns = "resolve_committed"; m.id = 0;
-          m.type   = visualization_msgs::Marker::ARROW;
-          m.action = visualization_msgs::Marker::ADD;
-          m.pose.position.x = committed_viewpoint_[0];
-          m.pose.position.y = committed_viewpoint_[1];
-          m.pose.position.z = committed_viewpoint_[2];
           tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_viewpoint_[3]);
-          m.pose.orientation.x = vq.x(); m.pose.orientation.y = vq.y();
-          m.pose.orientation.z = vq.z(); m.pose.orientation.w = vq.w();
-          m.scale.x = 2.0; m.scale.y = 0.3; m.scale.z = 0.3;
-          m.color.r = 0.0; m.color.g = 1.0; m.color.b = 0.0; m.color.a = 1.0;
-          m.lifetime = ros::Duration(0);  // persistent until overwritten
-          viz.markers.push_back(m);
+          if (committed_viewpoint_roll_ != 0.0) {
+            tf::Quaternion rq; rq.setEuler(0.0, committed_viewpoint_roll_, 0.0);
+            vq = vq * rq;
+          }
+          addFrameMarkers(viz, "resolve_committed", 0, params_.world_frame,
+                          committed_viewpoint_[0], committed_viewpoint_[1], committed_viewpoint_[2],
+                          vq, 2.0, 1.0f);
         }
 
         // Committed target — magenta sphere at the U_TARGET position
@@ -396,7 +438,8 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
       if (resolve_waypoints_.empty())
       {
         ROS_WARN("[RESOLVE] planPathToGoal failed; re-selecting viewpoint next iteration.");
-        has_committed_viewpoint_ = false;
+        has_committed_viewpoint_  = false;
+        committed_viewpoint_roll_ = 0.0;
         state_machine_->exitResolveCommitment();
         // Hold current position and re-evaluate next tick.
         result.is_clear             = true;
@@ -448,7 +491,8 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         ROS_INFO("[RESOLVE] Arrived at viewpoint. Entering DWELL.");
         state_machine_->enterDwell(committed_target_);
         dwell_controller_->startDwell(committed_target_, current_state_, params_);
-        has_committed_viewpoint_ = false;
+        has_committed_viewpoint_  = false;
+        committed_viewpoint_roll_ = 0.0;
         state_machine_->exitResolveCommitment();
         resolve_waypoints_.clear();
         resolve_wp_idx_ = 0;
@@ -501,12 +545,14 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     Eigen::Vector4d next_pose;
     next_pose.head<3>() = current_state_.head<3>() + step * dir;
 
+    double step_roll = 0.0;
     {
       double dist_to_goal =
           (committed_viewpoint_.head<3>() - next_pose.head<3>()).norm();
-      if (dist_to_goal < params_.dwell_arrival_thresh)
+      if (dist_to_goal < params_.dwell_arrival_thresh) {
         next_pose[3] = committed_viewpoint_[3];
-      else if (params_.resolve_face_target)
+        step_roll    = committed_viewpoint_roll_;  // bank to commanded roll on final approach
+      } else if (params_.resolve_face_target)
         next_pose[3] = std::atan2(
             committed_target_.pos.y() - next_pose[1],
             committed_target_.pos.x() - next_pose[0]);
@@ -518,22 +564,17 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     {
       visualization_msgs::MarkerArray viz;
 
-      visualization_msgs::Marker vp;
-      vp.header.stamp    = ros::Time::now();
-      vp.header.frame_id = params_.world_frame;
-      vp.ns = "resolve_committed"; vp.id = 0;
-      vp.type   = visualization_msgs::Marker::ARROW;
-      vp.action = visualization_msgs::Marker::ADD;
-      vp.pose.position.x = committed_viewpoint_[0];
-      vp.pose.position.y = committed_viewpoint_[1];
-      vp.pose.position.z = committed_viewpoint_[2];
-      tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_viewpoint_[3]);
-      vp.pose.orientation.x = vq.x(); vp.pose.orientation.y = vq.y();
-      vp.pose.orientation.z = vq.z(); vp.pose.orientation.w = vq.w();
-      vp.scale.x = 2.0; vp.scale.y = 0.3; vp.scale.z = 0.3;
-      vp.color.r = 0.0; vp.color.g = 1.0; vp.color.b = 0.0; vp.color.a = 1.0;
-      vp.lifetime = ros::Duration(0);
-      viz.markers.push_back(vp);
+      // 3-axis frame for committed viewpoint (ids 0,1,2)
+      {
+        tf::Quaternion vq; vq.setEuler(0.0, 0.0, committed_viewpoint_[3]);
+        if (committed_viewpoint_roll_ != 0.0) {
+          tf::Quaternion rq; rq.setEuler(0.0, committed_viewpoint_roll_, 0.0);
+          vq = vq * rq;
+        }
+        addFrameMarkers(viz, "resolve_committed", 0, params_.world_frame,
+                        committed_viewpoint_[0], committed_viewpoint_[1], committed_viewpoint_[2],
+                        vq, 2.0, 1.0f);
+      }
 
       visualization_msgs::Marker tgt;
       tgt.header.stamp    = ros::Time::now();
@@ -554,7 +595,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     }
 
     result.is_clear             = true;
-    result.pose.pose            = vecToPose(next_pose);
+    result.pose.pose            = vecToPose(next_pose, step_roll);
     result.pose.header.stamp    = ros::Time::now();
     result.pose.header.frame_id = params_.world_frame;
     succeed("RESOLVE_STEP"); return;
@@ -637,7 +678,7 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
         if (best_score >= params_.min_explore_gain)
         {
           has_committed_explore_viewpoint_   = true;
-explore_hold_count_                = 0;
+          explore_hold_count_                = 0;
           explore_waypoints_.clear();
           explore_wp_idx_ = 0;
           ROS_INFO_STREAM("[EXPLORE] Committed viewpoint ("
@@ -892,7 +933,7 @@ explore_hold_count_                = 0;
       }
     }
     // No committed path — hold position and re-evaluate next tick.
-if (++explore_hold_count_ >= kMaxExploreHoldTicks)
+    if (++explore_hold_count_ >= kMaxExploreHoldTicks)
     {
       ROS_WARN("[EXPLORE] Held for %d ticks with no progress; forcing DONE.",
                kMaxExploreHoldTicks);
@@ -1228,20 +1269,22 @@ void AEPlanner::computePriorityCache()
                    << " priority voxels (r_max=" << params_.r_max << ")");
 }
 
-std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
+std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state, double robot_roll)
 {
   // No lock — reads planning_snapshot_ built at the top of execute().
   // Occlusion check uses a linear ray march against the snapshot instead of
   // the RayCaster (which required a live map read per traversal step).
-  tf::Vector3 base_origin(state[0], state[1], state[2]);
 
-  tf::StampedTransform base_to_sensor;
-  try {
-    tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame,
-                                 ros::Time(0), base_to_sensor);
-  } catch (tf::TransformException &ex) {
-    ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
-    base_to_sensor.setIdentity();
+  // Option 1: use cached rest-position sensor transform (avoids live servo-angle noise).
+  if (!sensor_transform_rest_valid_) {
+    try {
+      tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame,
+                                   ros::Time(0), sensor_transform_rest_);
+      sensor_transform_rest_valid_ = true;
+    } catch (tf::TransformException &ex) {
+      ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor is at base_link.", ex.what());
+      sensor_transform_rest_.setIdentity();
+    }
   }
 
   const double hfov_rad = params_.hfov * M_PI / 180.0;
@@ -1250,46 +1293,61 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
   const double r_min    = params_.r_min;
   const float  snap_res = planning_snapshot_.resolution;
 
+  // Option 3: robot_roll ≠ 0 banks the AUV around its longitudinal (X) axis.
+  // setEuler(yaw_arg, pitch_arg, roll_arg): roll_arg → Z rotation; pitch_arg → X rotation.
+  tf::Vector3 base_origin(state[0], state[1], state[2]);
   tf::Quaternion base_quat;
   base_quat.setEuler(0.0, 0.0, state[3]);
-  tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * base_to_sensor;
+  if (robot_roll != 0.0) {
+    tf::Quaternion roll_quat;
+    roll_quat.setEuler(0.0, robot_roll, 0.0);  // X rotation (body longitudinal axis) by robot_roll
+    base_quat = base_quat * roll_quat;          // right-multiply: roll applied in body frame
+  }
+  tf::Pose robot_pose(base_quat, base_origin);
 
-  Eigen::Vector3d t_cand(sensor_pose_in_world.getOrigin().x(),
-                         sensor_pose_in_world.getOrigin().y(),
-                         sensor_pose_in_world.getOrigin().z());
+  // Sensor origin in world (constant for all servo roll angles since servo pivot = sensor origin).
+  tf::Pose sensor_pose_rest = robot_pose * sensor_transform_rest_;
+  Eigen::Vector3d t_cand(sensor_pose_rest.getOrigin().x(),
+                         sensor_pose_rest.getOrigin().y(),
+                         sensor_pose_rest.getOrigin().z());
 
-  tf::Matrix3x3 sensor_rot     = sensor_pose_in_world.getBasis();
-  tf::Matrix3x3 sensor_rot_inv = sensor_rot.transpose();
-
-  // Sonar z-axis in world frame R[:,2] — used for n_pred (PDF §6)
-  tf::Vector3 z_cand_tf = sensor_rot * tf::Vector3(0.0, 0.0, 1.0);
-  Eigen::Vector3d z_cand(z_cand_tf.x(), z_cand_tf.y(), z_cand_tf.z());
+  // Option 2: build N_roll sensor orientations spanning [-roll_amplitude, +roll_amplitude].
+  // N_roll = 1 (n_roll_samples <= 1) → rest position only, same as Option 1.
+  // Servo rolls around sensor X axis (right-multiply by Rx(theta)).
+  const int N_roll = std::max(1, params_.n_roll_samples);
+  std::vector<tf::Matrix3x3> sensor_rots;
+  sensor_rots.reserve(N_roll);
+  {
+    tf::Matrix3x3 rest_basis = sensor_pose_rest.getBasis();
+    for (int ri = 0; ri < N_roll; ++ri)
+    {
+      double theta = 0.0;
+      if (N_roll > 1)
+        theta = -params_.roll_amplitude
+                + (2.0 * params_.roll_amplitude * ri) / static_cast<double>(N_roll - 1);
+      tf::Quaternion q_servo;
+      q_servo.setEuler(0.0, theta, 0.0);  // X rotation by theta (sensor frame)
+      sensor_rots.push_back(rest_basis * tf::Matrix3x3(q_servo));
+    }
+  }
 
   double score = 0.0;
 
   for (const PriorityVoxel &pv : priority_cache_)
   {
-    // Range check
+    // Range check (once — independent of sensor orientation)
     Eigen::Vector3d diff = pv.pos - t_cand;
     double range = diff.norm();
     if (range > r_max || range < r_min) continue;
 
-    // FOV check: azimuth and elevation in sensor frame
     Eigen::Vector3d los_k = diff / range;
-    tf::Vector3 los_k_sensor = sensor_rot_inv * tf::Vector3(los_k.x(), los_k.y(), los_k.z());
-    double az = std::atan2(los_k_sensor.y(), los_k_sensor.x());
-    double el = std::atan2(los_k_sensor.z(),
-                           std::sqrt(los_k_sensor.x()*los_k_sensor.x() +
-                                     los_k_sensor.y()*los_k_sensor.y()));
-    if (std::fabs(az) > hfov_rad * 0.5 || std::fabs(el) > vfov_rad * 0.5) continue;
 
-    // Boundary check
+    // Boundary check (once)
     Eigen::Vector4d pv4(pv.pos.x(), pv.pos.y(), pv.pos.z(), 0);
     if (!isInsideBoundaries(pv4)) continue;
 
-    // Occlusion check: linear march from sensor toward voxel, step = resolution.
-    // Any snapshot-occupied voxel closer than snap_res to the target voxel is
-    // the target itself — stop without declaring occlusion.
+    // Occlusion check (once — ray path is independent of sensor orientation).
+    // Any snapshot-occupied voxel within snap_res of the target voxel is the target — stop.
     {
       const int n_steps = static_cast<int>(range / snap_res) + 1;
       bool occluded = false;
@@ -1299,7 +1357,7 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
         float dx = static_cast<float>(pt.x() - pv.pos.x());
         float dy = static_cast<float>(pt.y() - pv.pos.y());
         float dz = static_cast<float>(pt.z() - pv.pos.z());
-        if (std::sqrt(dx*dx + dy*dy + dz*dz) <= snap_res) break;  // reached target
+        if (std::sqrt(dx*dx + dy*dy + dz*dz) <= snap_res) break;
         if (planning_snapshot_.occupied(static_cast<float>(pt.x()),
                                         static_cast<float>(pt.y()),
                                         static_cast<float>(pt.z())))
@@ -1308,15 +1366,34 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
       if (occluded) continue;
     }
 
-    // Predicted constraint direction n_pred = z_cand - dot(z_cand, los_k) * los_k  (PDF §6)
-    Eigen::Vector3d n_pred = z_cand - z_cand.dot(los_k) * los_k;
-    double n_norm = n_pred.norm();
-    if (n_norm < 1e-8) continue;
-    n_pred /= n_norm;
+    // Roll-averaged alignment: sum over N_roll angles, divide by N_roll.
+    // Angles outside FOV contribute 0 → result is expected alignment under uniform servo sweep.
+    double alignment_sum = 0.0;
+    for (int ri = 0; ri < N_roll; ++ri)
+    {
+      const tf::Matrix3x3& sensor_rot     = sensor_rots[ri];
+      tf::Matrix3x3        sensor_rot_inv = sensor_rot.transpose();
 
-    // Alignment with weak direction (squared dot product — n and -n equivalent)
-    double alignment = std::pow(n_pred.dot(pv.v_weak), 2);
-    score += pv.priority * alignment;
+      // FOV check in this roll orientation
+      tf::Vector3 los_k_sensor = sensor_rot_inv * tf::Vector3(los_k.x(), los_k.y(), los_k.z());
+      double az = std::atan2(los_k_sensor.y(), los_k_sensor.x());
+      double el = std::atan2(los_k_sensor.z(),
+                             std::sqrt(los_k_sensor.x()*los_k_sensor.x() +
+                                       los_k_sensor.y()*los_k_sensor.y()));
+      if (std::fabs(az) > hfov_rad * 0.5 || std::fabs(el) > vfov_rad * 0.5) continue;
+
+      // n_pred = sonar z-axis projected perpendicular to LOS (PDF §6)
+      tf::Vector3 z_cand_tf = sensor_rot * tf::Vector3(0.0, 0.0, 1.0);
+      Eigen::Vector3d z_cand(z_cand_tf.x(), z_cand_tf.y(), z_cand_tf.z());
+      Eigen::Vector3d n_pred = z_cand - z_cand.dot(los_k) * los_k;
+      double n_norm = n_pred.norm();
+      if (n_norm < 1e-8) continue;
+      n_pred /= n_norm;
+
+      alignment_sum += std::pow(n_pred.dot(pv.v_weak), 2);
+    }
+
+    score += pv.priority * (alignment_sum / static_cast<double>(N_roll));
   }
 
   ROS_DEBUG_STREAM("gainCubature at (" << state[0] << ", " << state[1] << ", " << state[2]
@@ -1326,15 +1403,16 @@ std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state)
 
 double AEPlanner::gainExploration(const Eigen::Vector4d& state)
 {
-  // Set up sensor pose — same TF lookup as gainCubature.
-  tf::Vector3 base_origin(state[0], state[1], state[2]);
-  tf::StampedTransform base_to_sensor;
-  try {
-    tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame,
-                                 ros::Time(0), base_to_sensor);
-  } catch (tf::TransformException& ex) {
-    ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor at base_link.", ex.what());
-    base_to_sensor.setIdentity();
+  // Use cached rest-position sensor transform (same as gainCubature).
+  if (!sensor_transform_rest_valid_) {
+    try {
+      tf_listener_.lookupTransform(params_.robot_frame, params_.sensor_frame,
+                                   ros::Time(0), sensor_transform_rest_);
+      sensor_transform_rest_valid_ = true;
+    } catch (tf::TransformException& ex) {
+      ROS_ERROR_THROTTLE(1.0, "AEPlanner: %s. Assuming sensor at base_link.", ex.what());
+      sensor_transform_rest_.setIdentity();
+    }
   }
 
   const double hfov_rad = params_.hfov * M_PI / 180.0;
@@ -1343,9 +1421,10 @@ double AEPlanner::gainExploration(const Eigen::Vector4d& state)
   const double r_min    = params_.r_min;
   const float  snap_res = planning_snapshot_.resolution;
 
+  tf::Vector3 base_origin(state[0], state[1], state[2]);
   tf::Quaternion base_quat;
   base_quat.setEuler(0.0, 0.0, state[3]);
-  tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * base_to_sensor;
+  tf::Pose sensor_pose_in_world = tf::Pose(base_quat, base_origin) * sensor_transform_rest_;
 
   Eigen::Vector3d t_sensor(sensor_pose_in_world.getOrigin().x(),
                             sensor_pose_in_world.getOrigin().y(),
@@ -1638,13 +1717,17 @@ void AEPlanner::agentPoseCallback(const geometry_msgs::PoseStamped& msg)
                                       current_state_[2]));
 }
 
-geometry_msgs::Pose AEPlanner::vecToPose(Eigen::Vector4d state)
+geometry_msgs::Pose AEPlanner::vecToPose(Eigen::Vector4d state, double roll)
 {
   tf::Vector3 origin(state[0], state[1], state[2]);
-  double yaw = state[3];
 
   tf::Quaternion quat;
-  quat.setEuler(0.0, 0.0, yaw);
+  quat.setEuler(0.0, 0.0, state[3]);
+  if (roll != 0.0) {
+    tf::Quaternion roll_quat;
+    roll_quat.setEuler(0.0, roll, 0.0);  // X rotation by roll (body longitudinal axis)
+    quat = quat * roll_quat;
+  }
   tf::Pose pose_tf(quat, origin);
 
   geometry_msgs::Pose pose;

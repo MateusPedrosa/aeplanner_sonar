@@ -66,11 +66,17 @@ std::vector<CandidatePose> HemisphereSampler::sampleCandidates(
 
     Eigen::Vector4d state(p_cand.x(), p_cand.y(), p_cand.z(), yaw);
     double dist = (p_cand - robot_state.head<3>()).norm();
-    // Score uses only distance penalty here; gain scoring happens in gainCubature
-    // called from expandRRT after try_candidate accepts the pose.
     double score = target.priority * std::exp(-lambda_d * dist);
 
-    candidates.push_back({state, score});
+    // Option 3: sample robot roll uniformly in [-robot_roll_amplitude, +robot_roll_amplitude].
+    double roll = 0.0;
+    if (params.sample_robot_roll && params.robot_roll_amplitude > 0.0)
+    {
+      double u = (double)rand() / (double)RAND_MAX;  // [0, 1]
+      roll = -params.robot_roll_amplitude + 2.0 * params.robot_roll_amplitude * u;
+    }
+
+    candidates.push_back({state, score, roll});
   }
 
   // Fallback: if fewer than 5 collision-free candidates, add a nearest projection
@@ -82,8 +88,14 @@ std::vector<CandidatePose> HemisphereSampler::sampleCandidates(
       double yaw = std::atan2(target.pos.y() - p_proj.y(),
                               target.pos.x() - p_proj.x());
       double dist = (p_proj - robot_state.head<3>()).norm();
+      double roll = 0.0;
+      if (params.sample_robot_roll && params.robot_roll_amplitude > 0.0)
+      {
+        double u = (double)rand() / (double)RAND_MAX;
+        roll = -params.robot_roll_amplitude + 2.0 * params.robot_roll_amplitude * u;
+      }
       candidates.push_back({{p_proj.x(), p_proj.y(), p_proj.z(), yaw},
-                             target.priority * std::exp(-lambda_d * dist)});
+                             target.priority * std::exp(-lambda_d * dist), roll});
     }
   }
 

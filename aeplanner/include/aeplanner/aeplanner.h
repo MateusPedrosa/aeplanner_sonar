@@ -133,6 +133,7 @@ private:
   // then followed step-by-step until arrival triggers DWELL.
   bool            has_committed_viewpoint_ = false;
   Eigen::Vector4d committed_viewpoint_;
+  double          committed_viewpoint_roll_ = 0.0;  // robot roll commanded on final approach
   ScoredTarget    committed_target_;
   PlannerState    prev_planner_state_ = PlannerState::EXPLORE;
 
@@ -153,7 +154,7 @@ private:
   std::vector<Eigen::Vector4d> explore_waypoints_;
   int                          explore_wp_idx_       = 0;
   int                          explore_hold_count_   = 0;
-static constexpr int         kMaxExploreHoldTicks  = 10;
+  static constexpr int         kMaxExploreHoldTicks  = 10;
 
   // Subscribers
   ros::Subscriber point_sub_;
@@ -170,6 +171,11 @@ static constexpr int         kMaxExploreHoldTicks  = 10;
   // TF
   tf::TransformListener tf_listener_;
 
+  // Cached sensor-to-robot transform at servo rest position.
+  // Populated on first successful lookupTransform; reused by all gainCubature / gainExploration calls.
+  tf::StampedTransform sensor_transform_rest_;
+  bool                 sensor_transform_rest_valid_ = false;
+
   // Services
   ros::ServiceServer reevaluate_server_;
 
@@ -184,7 +190,7 @@ static constexpr int         kMaxExploreHoldTicks  = 10;
   void rewire(kdtree* kd_tree, RRTNode* new_node, double l, double r, double r_os);
   Eigen::Vector4d restrictDistance(Eigen::Vector4d nearest, Eigen::Vector4d new_pos);
 
-  std::pair<double, double> gainCubature(Eigen::Vector4d state);
+  std::pair<double, double> gainCubature(Eigen::Vector4d state, double robot_roll = 0.0);
   double gainExploration(const Eigen::Vector4d& state);
 
   std::vector<Eigen::Vector4d> planPathToGoal(const Eigen::Vector4d& goal);
@@ -213,7 +219,7 @@ static constexpr int         kMaxExploreHoldTicks  = 10;
   void computePriorityCache();
 
   // ---------------- Helpers ----------------
-  geometry_msgs::Pose vecToPose(Eigen::Vector4d state);
+  geometry_msgs::Pose vecToPose(Eigen::Vector4d state, double roll = 0.0);
 
   float CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2,
                           float lsq, float rsq, const octomap::point3d& pt);
