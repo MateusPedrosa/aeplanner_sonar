@@ -218,6 +218,32 @@ private:
   Eigen::Vector3d  priority_cache_built_pos_ = Eigen::Vector3d::Zero();
   void computePriorityCache();
 
+  // Incremental candidate index (Option B).
+  // candidate_index_ maps quantised voxel position → {priority, raw info[6]}.
+  // It is bootstrapped once with a full map scan, then kept current by applying
+  // dirty entries produced by commit_pointcloud_update() on every sonar callback.
+  struct VoxelKey {
+    int32_t ix, iy, iz;
+    bool operator==(const VoxelKey& o) const noexcept {
+      return ix == o.ix && iy == o.iy && iz == o.iz;
+    }
+  };
+  struct VoxelKeyHash {
+    size_t operator()(const VoxelKey& k) const noexcept {
+      uint32_t h = static_cast<uint32_t>(k.ix) * 2654435761u
+                 ^ static_cast<uint32_t>(k.iy) * 2246822519u
+                 ^ static_cast<uint32_t>(k.iz) * 3266489917u;
+      return static_cast<size_t>(h);
+    }
+  };
+  struct CandidateEntry { float priority; float info[6]; };
+  std::unordered_map<VoxelKey, CandidateEntry, VoxelKeyHash> candidate_index_;
+  bool index_bootstrapped_ = false;
+
+  // Dirty entries queued by cloudCallback, consumed by computePriorityCache().
+  std::vector<la3dm::BGKLOctoMap::DirtyEntry> dirty_buffer_;
+  std::mutex                                   dirty_mutex_;
+
   // ---------------- Helpers ----------------
   geometry_msgs::Pose vecToPose(Eigen::Vector4d state, double roll = 0.0);
 

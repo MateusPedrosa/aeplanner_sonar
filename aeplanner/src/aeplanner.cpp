@@ -121,10 +121,8 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
 {
   aeplanner::aeplannerResult result;
   const ros::WallTime t_exec_start = ros::WallTime::now();
-  // Thin wrapper: log state + elapsed time, then call setSucceeded.
   auto succeed = [&](const char* state_tag) {
-    ROS_WARN_STREAM_THROTTLE(1.0,
-      "[EXEC_TIMING] state=" << state_tag
+    ROS_WARN_STREAM("[EXEC_TIMING] state=" << state_tag
       << "  elapsed=" << (ros::WallTime::now() - t_exec_start).toSec() << "s");
     as_.setSucceeded(result);
   };
@@ -157,6 +155,11 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
   // State machine tick — determines EXPLORE/RESOLVE/DWELL/DONE
   std::vector<ScoredTarget> tpm_targets;
   if (tpm_) tpm_targets = tpm_->getTargets();
+
+  ROS_WARN_THROTTLE(2.0, "[EXEC] tpm_targets=%zu  dwell=%d  resolve=%d",
+    tpm_targets.size(),
+    (int)state_machine_->inDwell(),
+    (int)state_machine_->inResolveCommitment());
 
   PlannerState planner_state =
       state_machine_->tick(tpm_targets, current_state_, params_);
@@ -1167,84 +1170,92 @@ bool AEPlanner::reevaluate(aeplanner::Reevaluate::Request& req,
 
 void AEPlanner::computePriorityCache()
 {
-  // Skip rebuild if the robot hasn't moved significantly — the leaf iteration
-  // under shared_lock is O(N_leaves_in_sphere) and grows as FREE voxels accumulate.
   constexpr double kRebuildDist = 1.5;
   if (priority_cache_valid_ &&
       (current_state_.head<3>() - priority_cache_built_pos_).norm() < kRebuildDist)
     return;
 
   std::shared_ptr<la3dm::BGKLOctoMap> ot = ot_;
+  const float res = ot->get_resolution();
 
-  la3dm::point3f t_plan_p3f((float)current_state_[0],
-                             (float)current_state_[1],
-                             (float)current_state_[2]);
   Eigen::Vector3d t_plan(current_state_[0], current_state_[1], current_state_[2]);
+  const int    K        = params_.nbv_k;
+  const double r_max_sq = params_.r_max * params_.r_max;
 
-  const int K = params_.nbv_k;
+  // Lambda: convert a world-frame point to the quantised VoxelKey used by candidate_index_.
+  auto to_key = [res](const la3dm::point3f& p) -> VoxelKey {
+    return { static_cast<int32_t>(std::lround(p.x() / res)),
+             static_cast<int32_t>(std::lround(p.y() / res)),
+             static_cast<int32_t>(std::lround(p.z() / res)) };
+  };
 
-  // Staging entry: raw data needed to compute eigenstruct after the lock is released.
-  // Storing info[6] (24 bytes) is far cheaper than calling get_2d_eigenstruct() for
-  // every voxel when only K of the ~3M candidates will survive.
+  ros::WallTime t0 = ros::WallTime::now();
+
+  // Incremental path (also serves as bootstrap on first call):
+  // dirty_buffer_ accumulates every voxel updated by every cloudCallback since
+  // the last drain.  Because cloudCallback appends after releasing ot_mutex_,
+  // this drain is lock-free — no shared_lock(ot_mutex_) needed.
+  {
+    std::vector<la3dm::BGKLOctoMap::DirtyEntry> pending;
+    {
+      std::lock_guard<std::mutex> dlk(dirty_mutex_);
+      pending.swap(dirty_buffer_);
+    }
+    for (const auto& e : pending) {
+      VoxelKey key = to_key(e.pos);
+      if (e.active) {
+        CandidateEntry& ce = candidate_index_[key];
+        ce.priority = e.priority;
+        std::copy(e.info, e.info + 6, ce.info);
+      } else {
+        candidate_index_.erase(key);
+      }
+    }
+    if (!index_bootstrapped_) {
+      index_bootstrapped_ = true;
+      ROS_WARN("[CACHE_TIMING] bootstrap-from-dirty: %zu candidates  %.3fs",
+               candidate_index_.size(), (ros::WallTime::now() - t0).toSec());
+    } else {
+      ROS_WARN_THROTTLE(5.0,
+        "[CACHE_TIMING] incremental: %zu dirty  %.3fs  index=%zu",
+        pending.size(), (ros::WallTime::now() - t0).toSec(), candidate_index_.size());
+    }
+  }
+
+  // Extract top-K from candidate_index_ with r_max distance filter.
+  // Uses the same bounded min-heap as Change D but now iterates only
+  // N_candidates (<<N_all_leaves) entries rather than the full octree.
   struct StagedVoxel {
     Eigen::Vector3d pos;
     float           priority;
     float           info[6];
     bool operator>(const StagedVoxel& o) const { return priority > o.priority; }
   };
-
-  // Min-heap capped at K: top() is the weakest survivor.
-  // A new voxel enters only if it beats the current minimum, so the heap never
-  // holds more than K entries — no large vector, no realloc.
   std::priority_queue<StagedVoxel,
                       std::vector<StagedVoxel>,
                       std::greater<StagedVoxel>> heap;
 
-  ros::WallTime t_cache_lock_start = ros::WallTime::now();
-  {
-    std::shared_lock<std::shared_mutex> lock(ot_mutex_);
-    ros::WallTime t_cache_locked = ros::WallTime::now();
+  for (const auto& [key, ce] : candidate_index_) {
+    Eigen::Vector3d pos(key.ix * static_cast<double>(res),
+                        key.iy * static_cast<double>(res),
+                        key.iz * static_cast<double>(res));
+    if ((pos - t_plan).squaredNorm() > r_max_sq) continue;
 
-    for (auto it = ot->begin_leaf_in_sphere(t_plan_p3f, (float)params_.r_max);
-         it != ot->end_leaf(); ++it)
-    {
-      la3dm::OcTreeNode &node = it.get_node();
-      if (!node.has_active_info_matrix()) continue;
-
-      la3dm::point3f p_loc = it.get_loc();
-      Eigen::Vector3d p_k(p_loc.x(), p_loc.y(), p_loc.z());
-
-      Eigen::Vector3d diff = p_k - t_plan;
-      if (diff.squaredNorm() < 1e-12) continue;
-
-      float priority = node.get_var();
-      if (priority < 1e-8f) continue;
-
-      if ((int)heap.size() < K) {
-        StagedVoxel sv;
-        sv.pos      = p_k;
-        sv.priority = priority;
-        node.get_info(sv.info);
-        heap.push(sv);
-      } else if (priority > heap.top().priority) {
-        StagedVoxel sv;
-        sv.pos      = p_k;
-        sv.priority = priority;
-        node.get_info(sv.info);
-        heap.pop();
-        heap.push(sv);
-      }
+    if ((int)heap.size() < K) {
+      StagedVoxel sv;
+      sv.pos = pos; sv.priority = ce.priority;
+      std::copy(ce.info, ce.info + 6, sv.info);
+      heap.push(sv);
+    } else if (ce.priority > heap.top().priority) {
+      StagedVoxel sv;
+      sv.pos = pos; sv.priority = ce.priority;
+      std::copy(ce.info, ce.info + 6, sv.info);
+      heap.pop();
+      heap.push(sv);
     }
+  }
 
-    ros::WallTime t_cache_done = ros::WallTime::now();
-    ROS_WARN_THROTTLE(5.0,
-      "[CACHE_TIMING] lock_wait=%.3fs  lock_held=%.3fs  heap_size=%zu",
-      (t_cache_locked - t_cache_lock_start).toSec(),
-      (t_cache_done   - t_cache_locked).toSec(),
-      heap.size());
-  } // shared_lock released
-
-  // Compute eigenstruct for the K survivors only — lock-free, trivial cost.
+  // Compute eigenstruct for K survivors only — no lock needed.
   priority_cache_.clear();
   priority_cache_.reserve(heap.size());
   while (!heap.empty()) {
@@ -1572,10 +1583,20 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   auto t_lock_wait_start = ros::WallTime::now();
   std::unique_lock<std::shared_mutex> lock(ot_mutex_);
   auto t_lock_acquired = ros::WallTime::now();
-  ot_->commit_pointcloud_update(prepared);
+  std::vector<la3dm::BGKLOctoMap::DirtyEntry> local_dirty;
+  ot_->commit_pointcloud_update(prepared, &local_dirty);
   auto t_committed = ros::WallTime::now();
 
   lock.unlock();
+
+  // Hand dirty entries to computePriorityCache() for incremental index updates.
+  // Append under dirty_mutex_ after releasing ot_mutex_ to avoid holding two locks.
+  if (!local_dirty.empty()) {
+    std::lock_guard<std::mutex> dlk(dirty_mutex_);
+    dirty_buffer_.insert(dirty_buffer_.end(),
+                         std::make_move_iterator(local_dirty.begin()),
+                         std::make_move_iterator(local_dirty.end()));
+  }
   ROS_WARN_THROTTLE(2.0,
     "[CB_TIMING] prepare=%.3fs  wait_for_lock=%.3fs  commit=%.3fs",
     (t_lock_wait_start - t_prepare_start).toSec(),
