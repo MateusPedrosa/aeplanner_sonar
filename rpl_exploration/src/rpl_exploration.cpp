@@ -1,4 +1,9 @@
 #include <fstream>
+#include <ctime>
+#include <cmath>
+#include <cstdio>
+#include <iomanip>
+#include <unistd.h>
 
 #include <ros/package.h>
 #include <ros/ros.h>
@@ -113,6 +118,7 @@ int main(int argc, char** argv)
   // controller.
   int iteration = 0;
   int actions_taken = 1;
+  double total_distance_m = 0.0;
 
   ros::Time start = ros::Time::now();
   while (ros::ok())
@@ -143,6 +149,12 @@ int main(int argc, char** argv)
       pathfile << goal_pose.pose.position.x << ", " << goal_pose.pose.position.y
                << ", " << goal_pose.pose.position.z << ", n" << std::endl;
 
+      {
+        auto& p0 = last_pose.pose.position;
+        auto& p1 = goal_pose.pose.position;
+        double dx = p1.x-p0.x, dy = p1.y-p0.y, dz = p1.z-p0.z;
+        total_distance_m += std::sqrt(dx*dx + dy*dy + dz*dz);
+      }
       last_pose.pose = goal_pose.pose;
       rpl_exploration::FlyToGoal goal;
       goal.pose = goal_pose;
@@ -170,15 +182,105 @@ int main(int argc, char** argv)
           continue;
         }
         ROS_WARN("Exploration complete!!!!!!!!!!!!!!!!!!!!!!!!!");
+
+        double total_time_s = (ros::Time::now() - start).toSec();
+        ROS_INFO("[VIEWPLANNER] Total mission run time: %.2f s", total_time_s);
+
+        // Publish run time (latched)
+        std_msgs::Float64 rt;
+        rt.data = total_time_s;
+        run_time_pub.publish(rt);
+        ros::Duration(0.1).sleep();
+
+        // Create timestamped results directory
+        std::time_t now_t = std::time(nullptr);
+        char ts_buf[32];
+        std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d_%H-%M-%S",
+                      std::localtime(&now_t));
+        std::string ts(ts_buf);
+        std::string results_base = path + "/exploration_results";
+        std::string run_dir = results_base + "/" + ts;
+        system(("mkdir -p " + run_dir).c_str());
+
+        // Query coverage if the service is available
+        double coverage_pct = -1.0;
         {
-          std_msgs::Float64 rt;
-          rt.data = (ros::Time::now() - start).toSec();
-          ROS_INFO("[VIEWPLANNER] Total mission run time: %.2f s", rt.data);
-          run_time_pub.publish(rt);
-          ros::Duration(0.1).sleep();  // let the latched message flush before shutdown
+          aeplanner_evaluation::Coverage cov_srv;
+          if (coverage_srv.call(cov_srv))
+            coverage_pct = cov_srv.response.coverage;
         }
+
+        // Capture git commit hash (local read only, no network calls)
+        std::string git_hash = "unknown";
+        {
+          FILE* pipe = popen(("git -C " + path + " rev-parse HEAD 2>/dev/null").c_str(), "r");
+          if (pipe) {
+            char buf[64] = {};
+            if (fgets(buf, sizeof(buf), pipe)) {
+              git_hash = buf;
+              git_hash.erase(git_hash.find_last_not_of("\n\r") + 1);
+            }
+            pclose(pipe);
+          }
+        }
+
+        // Write results.txt
+        {
+          char hostname[256] = "unknown";
+          gethostname(hostname, sizeof(hostname));
+
+          std::ofstream rf(run_dir + "/results.txt");
+          rf << "=== Exploration Run Results ===\n"
+             << "Date/Time:       " << ts << "\n"
+             << "Hostname:        " << hostname << "\n"
+             << "Git commit:      " << git_hash << "\n"
+             << "Run time (s):    " << std::fixed << std::setprecision(2)
+                                    << total_time_s << "\n"
+             << "Distance (m):    " << std::setprecision(2)
+                                    << total_distance_m << "\n"
+             << "Iterations:      " << iteration << "\n";
+          if (coverage_pct >= 0.0)
+            rf << "Map coverage:    " << std::setprecision(1)
+               << coverage_pct * 100.0 << " %\n";
+          rf << "Final pose:      x=" << std::setprecision(3)
+             << last_pose.pose.position.x
+             << " y=" << last_pose.pose.position.y
+             << " z=" << last_pose.pose.position.z << "\n"
+             << "\n"
+             << "Files in this directory:\n"
+             << "  logfile.csv  — per-iteration: iter, elapsed_s, sampling_s,"
+                " planning_s, collision_s, fly_s, tree_size\n"
+             << "  path.csv     — waypoints visited (x, y, z, type)"
+                " where type=n (AEP) or f (RRT frontier)\n"
+             << "  map.ply        — final map variance state (colour = variance,"
+                " blue=low, red=high)\n"
+             << "  ros_params.yaml — all live ROS parameters at mission end\n"
+             << "\n"
+             << "=== exploration.yaml ===\n";
+          std::ifstream ey(path + "/config/exploration.yaml");
+          rf << ey.rdbuf();
+          rf << "\n=== viewplanner_params.yaml ===\n";
+          std::ifstream vy(path + "/config/viewplanner_params.yaml");
+          rf << vy.rdbuf();
+        }
+
+        // Close and relocate CSV files into the run directory
+        pathfile.close();
+        logfile.close();
+        system(("mv " + path + "/data/logfile.csv " + run_dir + "/logfile.csv").c_str());
+        system(("mv " + path + "/data/path.csv "    + run_dir + "/path.csv").c_str());
+
+        // Dump all live ROS parameters (captures any launch-time overrides)
+        system(("rosparam dump " + run_dir + "/ros_params.yaml 2>/dev/null").c_str());
+
+        // Capture final map state as a PLY file (runs as a background ROS node)
+        std::string ply_script = path + "/nodes/variance_to_ply.py";
+        system(("python3 " + ply_script + " " + run_dir + "/map.ply &").c_str());
+
+        ROS_INFO("[VIEWPLANNER] Results saved to: %s", run_dir.c_str());
+
         ros::shutdown();
-        break;
+        return 0;
       }
       for (auto it = aep_ac.getResult()->frontiers.poses.begin();
            it != aep_ac.getResult()->frontiers.poses.end(); ++it)
@@ -203,6 +305,11 @@ int main(int argc, char** argv)
         pathfile << goal_pose.position.x << ", " << goal_pose.position.y << ", "
                  << goal_pose.position.z << ", f" << std::endl;
 
+        {
+          auto& p0 = last_pose.pose.position;
+          double dx = goal_pose.position.x-p0.x, dy = goal_pose.position.y-p0.y, dz = goal_pose.position.z-p0.z;
+          total_distance_m += std::sqrt(dx*dx + dy*dy + dz*dz);
+        }
         last_pose.pose = goal_pose;
         rpl_exploration::FlyToGoal goal;
         goal.pose.pose = goal_pose;
