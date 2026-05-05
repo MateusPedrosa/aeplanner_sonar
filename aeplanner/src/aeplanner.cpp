@@ -959,21 +959,6 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
   succeed("FALLTHROUGH_HOLD");
 }
 
-Eigen::Vector4d AEPlanner::sampleNewPoint()
-{
-  // Samples one point uniformly over a sphere with a radius of
-  // param_.max_sampling_radius
-  Eigen::Vector4d point = Eigen::Vector4d::Zero();
-  do
-  {
-    for (int i = 0; i < 3; i++)
-      point[i] = params_.max_sampling_radius * 2.0 *
-                 (((double)rand()) / ((double)RAND_MAX) - 0.5);
-  } while (pow(point[0], 2.0) + pow(point[1], 2.0) + pow(point[2], 2.0) >
-           pow(params_.max_sampling_radius, 2.0));
-
-  return point;
-}
 
 RRTNode* AEPlanner::chooseParent(RRTNode* node, double l, kdtree* tree)
 {
@@ -1011,8 +996,55 @@ RRTNode* AEPlanner::chooseParent(RRTNode* node, double l, kdtree* tree)
 
 std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& goal)
 {
-  kdtree* path_kd = kd_create(3);
+  const Eigen::Vector3d x_start = current_state_.head<3>();
+  const Eigen::Vector3d x_goal  = goal.head<3>();
 
+  // --- 1. Straight-line shortcut: skip RRT entirely if clear ---
+  if (!collisionLine(current_state_, goal, params_.bounding_radius))
+    return {goal};
+
+  // --- 2. Informed RRT* (PHS) setup ---
+  // c_min: straight-line distance (hard lower bound on any path length).
+  // c_best: length of the best complete path found so far; starts at infinity.
+  // While c_best == inf the PHS covers a sphere around the midpoint big enough
+  // to reach both endpoints plus detour room.  Once any path is found the PHS
+  // shrinks to an ellipsoid that contains only samples that could improve it.
+  const double c_min = (x_goal - x_start).norm();
+  double c_best = std::numeric_limits<double>::infinity();
+
+  // Rotation matrix C: maps x-axis → start→goal direction.
+  // Columns: [a1 (major) | a2 | a3] form a right-hand orthonormal frame.
+  Eigen::Vector3d a1 = (x_goal - x_start) / c_min;
+  Eigen::Vector3d ref = (std::fabs(a1.z()) < 0.9) ? Eigen::Vector3d::UnitZ()
+                                                   : Eigen::Vector3d::UnitX();
+  Eigen::Vector3d a2 = a1.cross(ref).normalized();
+  Eigen::Vector3d a3 = a1.cross(a2);
+  Eigen::Matrix3d C; C.col(0) = a1; C.col(1) = a2; C.col(2) = a3;
+  const Eigen::Vector3d x_center = (x_start + x_goal) * 0.5;
+
+  // Sample uniformly from the Prolate HyperSpheroid (or fallback sphere).
+  auto sampleInformed = [&]() -> Eigen::Vector3d {
+    Eigen::Vector3d ball;
+    do {
+      ball = Eigen::Vector3d(2.0 * rand() / RAND_MAX - 1.0,
+                             2.0 * rand() / RAND_MAX - 1.0,
+                             2.0 * rand() / RAND_MAX - 1.0);
+    } while (ball.squaredNorm() > 1.0);
+
+    if (std::isinf(c_best)) {
+      // Sphere around midpoint large enough to contain both endpoints + detour slack.
+      double r = c_min * 0.5 + params_.max_sampling_radius;
+      return x_center + ball * r;
+    }
+    // PHS: semi-axes [c_best/2, r_minor, r_minor]
+    double r_minor = 0.5 * std::sqrt(std::max(0.0, c_best * c_best - c_min * c_min));
+    return C * Eigen::Vector3d(0.5 * c_best * ball[0],
+                               r_minor           * ball[1],
+                               r_minor           * ball[2]) + x_center;
+  };
+
+  // --- 3. RRT* main loop ---
+  kdtree* path_kd = kd_create(3);
   RRTNode* root = new RRTNode();
   root->state_ = current_state_;
   kd_insert3(path_kd, root->state_[0], root->state_[1], root->state_[2], root);
@@ -1023,26 +1055,23 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
   int dbg_no_parent = 0, dbg_oob = 0, dbg_collision = 0, dbg_added = 0;
   for (int i = 0; i < params_.cutoff_iterations && ros::ok(); ++i)
   {
-    // Goal-biased sampling: 30 % chance to sample the goal directly
-    Eigen::Vector4d sample = ((double)rand() / RAND_MAX < 0.3)
-        ? goal
-        : current_state_ + sampleNewPoint();
+    // 10% goal-biased, 90% informed sample.
+    Eigen::Vector4d sample;
+    if ((double)rand() / RAND_MAX < 0.1) {
+      sample = goal;
+    } else {
+      Eigen::Vector3d p = sampleInformed();
+      sample = Eigen::Vector4d(p.x(), p.y(), p.z(), 0.0);
+    }
 
     RRTNode* new_node = new RRTNode();
-    new_node->state_  = sample;
+    new_node->state_ = sample;
 
-    // RRT*: pick best-cost parent among near neighbours
     RRTNode* nearest = chooseParent(new_node, params_.extension_range, path_kd);
     if (!nearest) { delete new_node; ++dbg_no_parent; continue; }
 
     new_node->state_ = restrictDistance(nearest->state_, sample);
 
-    // Validity checks: only reject out-of-bounds or collision with an OCCUPIED
-    // voxel. Unknown space is traversable for a sparse underwater sonar — most
-    // of the 3D volume is UNKNOWN even near the robot, so gating on UNKNOWN here
-    // would block all path growth. Actual obstacle avoidance is handled by
-    // collisionLine (which only rejects OCCUPIED), consistent with the rest of
-    // the planner.
     if (!isInsideBoundaries(new_node->state_))
         { delete new_node; ++dbg_oob; continue; }
     if (collisionLine(nearest->state_, new_node->state_, params_.bounding_radius))
@@ -1051,18 +1080,23 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
 
     new_node->parent_ = nearest;
     nearest->children_.push_back(new_node);
-    kd_insert3(path_kd, new_node->state_[0], new_node->state_[1], new_node->state_[2], new_node);
+    kd_insert3(path_kd, new_node->state_[0], new_node->state_[1],
+               new_node->state_[2], new_node);
+    rewire(path_kd, new_node, params_.extension_range,
+           params_.bounding_radius, params_.d_overshoot_);
 
-    // RRT*: rewire near neighbours through new_node if cheaper
-    rewire(path_kd, new_node, params_.extension_range, params_.bounding_radius, params_.d_overshoot_);
-
-    double d = (new_node->state_.head<3>() - goal.head<3>()).norm();
+    double d = (new_node->state_.head<3>() - x_goal).norm();
     if (d < best_goal_dist) { best_goal_dist = d; best_goal_node = new_node; }
-    if (d < params_.dwell_arrival_thresh) break;
+
+    // Update c_best when a node reaches the goal region; do NOT break so the
+    // informed sampler keeps refining with the remaining iteration budget.
+    if (d < params_.dwell_arrival_thresh) {
+      double c = new_node->cost() + d;
+      if (c < c_best) c_best = c;
+    }
   }
 
-  // Extract waypoints by tracing parent pointers back to root, then reversing.
-  // Root itself is excluded (robot is already there).
+  // --- 4. Extract waypoints ---
   std::vector<Eigen::Vector4d> path;
   if (best_goal_node)
   {
@@ -1070,44 +1104,51 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
       path.push_back(cur->state_);
     std::reverse(path.begin(), path.end());
 
-    // Snap last waypoint to exact goal so the sensing yaw is preserved exactly.
-    // Check the final edge first; if it collides, leave the last RRT node as-is
-    // so the robot arrives as close as possible without entering occupied space.
-    if (!path.empty())
-    {
+    // Snap last waypoint to exact goal.
+    if (!path.empty()) {
       const Eigen::Vector4d& pre = (path.size() >= 2) ? path[path.size()-2]
                                                        : root->state_;
       if (!collisionLine(pre, goal, params_.bounding_radius))
         path.back() = goal;
-    }
-    else
-    {
+    } else {
       if (!collisionLine(current_state_, goal, params_.bounding_radius))
         path.push_back(goal);
     }
 
-    // Yaw for every intermediate waypoint: direction of travel TO that waypoint
-    // (backward-looking: from previous position toward current waypoint).
-    // This ensures the robot faces its actual travel direction rather than
-    // pre-rotating toward the next segment before reaching the current turn.
+    // --- 5. Greedy shortcutting ---
+    // Forward pass: from each node jump to the furthest successor reachable
+    // in a straight line, eliminating intermediate waypoints.
+    {
+      std::vector<Eigen::Vector4d> smooth;
+      Eigen::Vector4d from = current_state_;
+      int si = 0;
+      while (si < (int)path.size()) {
+        int sj = (int)path.size() - 1;
+        while (sj > si && collisionLine(from, path[sj], params_.bounding_radius))
+          --sj;
+        smooth.push_back(path[sj]);
+        from = path[sj];
+        si   = sj + 1;
+      }
+      path = std::move(smooth);
+    }
+
+    // Yaw: face direction of travel for every intermediate waypoint.
     for (int i = 0; i + 1 < (int)path.size(); ++i)
     {
-      const Eigen::Vector3d& prev = (i == 0) ? current_state_.head<3>() : path[i-1].head<3>();
+      const Eigen::Vector3d& prev = (i == 0) ? x_start : path[i-1].head<3>();
       Eigen::Vector3d d = path[i].head<3>() - prev;
       if (d.norm() > 1e-6) path[i][3] = std::atan2(d[1], d[0]);
     }
   }
 
-  // rewire() updates parent_ pointers but leaves children_ intact, so the
-  // full tree is still reachable from root via children_ — delete root cleans all nodes.
   kd_free(path_kd);
   delete root;
 
   ROS_INFO_STREAM("[RESOLVE] planPathToGoal: " << path.size()
     << " waypoints, best_goal_dist=" << best_goal_dist << " m"
     << "  [added=" << dbg_added << " no_parent=" << dbg_no_parent
-    << " oob=" << dbg_oob
-    << " collision=" << dbg_collision << "]");
+    << " oob=" << dbg_oob << " collision=" << dbg_collision << "]");
   return path;
 }
 

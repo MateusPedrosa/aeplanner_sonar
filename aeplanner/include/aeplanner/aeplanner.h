@@ -183,7 +183,6 @@ private:
   bool reevaluate(aeplanner::Reevaluate::Request& req,
                   aeplanner::Reevaluate::Response& res);
 
-  Eigen::Vector4d sampleNewPoint();
   bool isInsideBoundaries(Eigen::Vector4d point);
   bool collisionLine(Eigen::Vector4d p1, Eigen::Vector4d p2, double r);
   RRTNode* chooseParent(RRTNode* node, double l, kdtree* tree);
