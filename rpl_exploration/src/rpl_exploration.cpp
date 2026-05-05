@@ -14,6 +14,7 @@
 #include <rrtplanner/rrtAction.h>
 
 #include <geometry_msgs/PoseStamped.h>
+#include <std_msgs/Float64.h>
 
 #include <nav_msgs/Path.h>
 #include <tf2/utils.h>
@@ -34,6 +35,7 @@ int main(int argc, char** argv)
                                                               "setpoint_position/"
                                                               "local",
                                                               1000));
+  ros::Publisher run_time_pub(nh.advertise<std_msgs::Float64>("/viewplanner/run_time_s", 1, true));
 
   ros::ServiceClient coverage_srv =
       nh.serviceClient<aeplanner_evaluation::Coverage>("/get_coverage");
@@ -167,7 +169,14 @@ int main(int argc, char** argv)
           ros::Duration(2.0).sleep();
           continue;
         }
-        ROS_WARN("Exploration complete!");
+        ROS_WARN("Exploration complete!!!!!!!!!!!!!!!!!!!!!!!!!");
+        {
+          std_msgs::Float64 rt;
+          rt.data = (ros::Time::now() - start).toSec();
+          ROS_INFO("[VIEWPLANNER] Total mission run time: %.2f s", rt.data);
+          run_time_pub.publish(rt);
+          ros::Duration(0.1).sleep();  // let the latched message flush before shutdown
+        }
         ros::shutdown();
         break;
       }
