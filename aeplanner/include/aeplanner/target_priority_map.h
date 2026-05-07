@@ -35,6 +35,7 @@ struct TPMParams
   int    min_cluster_size;   // min voxels per E_TARGET cluster to consider as a target (default 5)
   int    min_u_cluster_size; // min voxels per U_TARGET cluster to consider as a target (default 1)
   double lambda_dist;        // exponential distance penalty (default 0.2)
+  bool   explore_free_space; // if false, E_FREE never published; mission ends when U_TARGET+E_OCC exhausted (default false)
 };
 
 // In-process Target Priority Map. Runs as a ros::Timer callback.
@@ -54,6 +55,10 @@ public:
   // Synchronous update called explicitly at episode boundaries (EXPLORE arrival,
   // DWELL exit). Does not check the pause flag.
   void updateNow();
+
+  // Synchronous update with pre-built leaves — no octree scan, no shared_lock.
+  // Caller builds leaves via AEPlanner::buildLeafEntriesFromStateIndex().
+  void updateNow(std::vector<LeafEntry> pre_built_leaves);
 
   // Called by the planner when it deems a target resolved (priority dropped).
   void recordSuccess(const Eigen::Vector3d& pos);
@@ -91,6 +96,9 @@ private:
   mutable std::mutex targets_mutex_;
 
   std::atomic<bool> paused_{ false };
+
+  void runClassifyAndPublish(std::vector<LeafEntry> raw_leaves,
+                             const Eigen::Vector3d& robot_pos);
 
   aeplanner::TargetList toROSMsg(const std::vector<ScoredTarget>& targets) const;
   void publishViz(const std::vector<ScoredTarget>& targets) const;

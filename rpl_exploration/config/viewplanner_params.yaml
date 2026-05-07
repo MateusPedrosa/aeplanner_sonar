@@ -16,6 +16,7 @@ viewplanner:
   # State machine
   alpha_bias:          1.0     # U vs E priority bias (1.0 = no bias)
   local_radius:        10.0    # Radius of "local volume" for EXPLORE vs REPOSITION (m)
+  explore_free_space:  false   # false = stop after U_TARGET+E_OCC resolved; true = full bounding-box coverage
 
   # Pose scoring and sampling
   lambda_dist:         0.75     # Exponential distance penalty: score *= exp(-lambda_dist * dist)

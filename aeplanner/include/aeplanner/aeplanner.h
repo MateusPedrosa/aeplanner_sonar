@@ -239,9 +239,25 @@ private:
   std::unordered_map<VoxelKey, CandidateEntry, VoxelKeyHash> candidate_index_;
   bool index_bootstrapped_ = false;
 
+  // State index: every observed voxel's classification, maintained from dirty drain.
+  // Used to build LeafEntry lists for TPM without any octree scan or shared_lock.
+  struct StateEntry {
+    la3dm::State state;
+    float        var;
+  };
+  std::unordered_map<VoxelKey, StateEntry, VoxelKeyHash> state_index_;
+
   // Dirty entries queued by cloudCallback, consumed by computePriorityCache().
-  std::vector<la3dm::BGKLOctoMap::DirtyEntry> dirty_buffer_;
-  std::mutex                                   dirty_mutex_;
+  // Stored as an unordered_map so cloudCallback deduplicates in-place:
+  // only the latest entry per voxel survives, and UNKNOWN-only voxels are
+  // never inserted. This keeps the map bounded to ~N_unique OCC/FREE voxels
+  // instead of growing to N_scans * N_prediction_voxels (~38M entries).
+  std::unordered_map<VoxelKey, la3dm::BGKLOctoMap::DirtyEntry, VoxelKeyHash> dirty_map_;
+  std::mutex                                                                   dirty_mutex_;
+
+  // Build a LeafEntry list from state_index_ for use by TPM — no octree scan, no lock.
+  std::vector<LeafEntry> buildLeafEntriesFromStateIndex(
+      const Eigen::Vector3d& robot_pos, float r_max) const;
 
   // ---------------- Helpers ----------------
   geometry_msgs::Pose vecToPose(Eigen::Vector4d state, double roll = 0.0);

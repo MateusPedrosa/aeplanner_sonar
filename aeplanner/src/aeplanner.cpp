@@ -2,6 +2,7 @@
 #include <tf2/utils.h>
 #include <future>
 #include <queue>
+#include <unordered_set>
 
 namespace aeplanner
 {
@@ -97,6 +98,7 @@ AEPlanner::AEPlanner(const ros::NodeHandle& nh)
   tpm_params.min_cluster_size   = params_.min_cluster_size;
   tpm_params.min_u_cluster_size = params_.min_u_cluster_size;
   tpm_params.lambda_dist        = params_.lambda_dist;
+  tpm_params.explore_free_space = params_.explore_free_space;
 
   tpm_ = std::make_unique<TargetPriorityMap>(nh_, ot_, ot_mutex_, tpm_params);
 
@@ -241,11 +243,11 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     if (!has_committed_viewpoint_)
     {
       if (tpm_update_needed_ && tpm_) {
-        // Run TPM update and priority cache concurrently — both use shared_lock only.
+        // computePriorityCache builds state_index_; TPM reads it — must be sequential.
         priority_cache_valid_ = false;
-        auto tpm_fut = std::async(std::launch::async, [this]{ tpm_->updateNow(); });
         computePriorityCache();
-        tpm_fut.wait();
+        auto tpm_leaves = buildLeafEntriesFromStateIndex(current_state_.head<3>(), params_.r_max);
+        tpm_->updateNow(std::move(tpm_leaves));
         tpm_targets = tpm_->getTargets();
         tpm_update_needed_ = false;
       } else {
@@ -619,7 +621,8 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     if (!has_committed_explore_viewpoint_)
     {
       if (tpm_update_needed_ && tpm_) {
-        tpm_->updateNow();
+        auto tpm_leaves = buildLeafEntriesFromStateIndex(current_state_.head<3>(), params_.r_max);
+        tpm_->updateNow(std::move(tpm_leaves));
         tpm_targets = tpm_->getTargets();
         tpm_update_needed_ = false;
       }
@@ -1223,27 +1226,20 @@ void AEPlanner::computePriorityCache()
   const int    K        = params_.nbv_k;
   const double r_max_sq = params_.r_max * params_.r_max;
 
-  // Lambda: convert a world-frame point to the quantised VoxelKey used by candidate_index_.
-  auto to_key = [res](const la3dm::point3f& p) -> VoxelKey {
-    return { static_cast<int32_t>(std::lround(p.x() / res)),
-             static_cast<int32_t>(std::lround(p.y() / res)),
-             static_cast<int32_t>(std::lround(p.z() / res)) };
-  };
-
   ros::WallTime t0 = ros::WallTime::now();
 
-  // Incremental path (also serves as bootstrap on first call):
-  // dirty_buffer_ accumulates every voxel updated by every cloudCallback since
-  // the last drain.  Because cloudCallback appends after releasing ot_mutex_,
-  // this drain is lock-free — no shared_lock(ot_mutex_) needed.
+  // Drain dirty_map_ — cloudCallback keeps it deduplicated (last-write-wins) and
+  // pre-filtered to OCC/FREE/active voxels only, so this loop is O(N_unique) not
+  // O(N_all_prediction_voxels).  No lock on ot_mutex_ needed.
   {
-    std::vector<la3dm::BGKLOctoMap::DirtyEntry> pending;
+    std::unordered_map<VoxelKey, la3dm::BGKLOctoMap::DirtyEntry, VoxelKeyHash> pending;
     {
       std::lock_guard<std::mutex> dlk(dirty_mutex_);
-      pending.swap(dirty_buffer_);
+      pending.swap(dirty_map_);
     }
-    for (const auto& e : pending) {
-      VoxelKey key = to_key(e.pos);
+    for (const auto& kv : pending) {
+      const VoxelKey&                        key = kv.first;
+      const la3dm::BGKLOctoMap::DirtyEntry&  e   = kv.second;
       if (e.active) {
         CandidateEntry& ce = candidate_index_[key];
         ce.priority = e.priority;
@@ -1251,14 +1247,21 @@ void AEPlanner::computePriorityCache()
       } else {
         candidate_index_.erase(key);
       }
+      if (e.state != la3dm::State::UNKNOWN) {
+        StateEntry& se = state_index_[key];
+        se.state = e.state;
+        se.var   = e.priority;
+      } else {
+        state_index_.erase(key);
+      }
     }
     if (!index_bootstrapped_) {
       index_bootstrapped_ = true;
-      ROS_WARN("[CACHE_TIMING] bootstrap-from-dirty: %zu candidates  %.3fs",
+      ROS_WARN("[CACHE_TIMING] bootstrap: %zu candidates  %.3fs",
                candidate_index_.size(), (ros::WallTime::now() - t0).toSec());
     } else {
       ROS_WARN_THROTTLE(5.0,
-        "[CACHE_TIMING] incremental: %zu dirty  %.3fs  index=%zu",
+        "[CACHE_TIMING] incremental: %zu unique dirty  %.3fs  index=%zu",
         pending.size(), (ros::WallTime::now() - t0).toSec(), candidate_index_.size());
     }
   }
@@ -1319,6 +1322,68 @@ void AEPlanner::computePriorityCache()
   priority_cache_built_pos_ = current_state_.head<3>();
   ROS_DEBUG_STREAM("computePriorityCache: " << priority_cache_.size()
                    << " priority voxels (r_max=" << params_.r_max << ")");
+}
+
+std::vector<LeafEntry> AEPlanner::buildLeafEntriesFromStateIndex(
+    const Eigen::Vector3d& robot_pos, float r_max) const
+{
+  const float res      = static_cast<float>(params_.resolution);
+  const float r_max_sq = r_max * r_max;
+
+  static const int kOff[6][3] = {
+    {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+  };
+
+  std::vector<LeafEntry> leaves;
+  leaves.reserve(state_index_.size() + 65536);
+
+  // Pass 1: all observed (OCC/FREE) voxels within r_max.
+  std::unordered_set<VoxelKey, VoxelKeyHash> in_sphere_keys;
+  in_sphere_keys.reserve(state_index_.size());
+  for (const auto& kv : state_index_) {
+    const VoxelKey&   key = kv.first;
+    const StateEntry& se  = kv.second;
+    float x = key.ix * res, y = key.iy * res, z = key.iz * res;
+    float dx = x - static_cast<float>(robot_pos.x());
+    float dy = y - static_cast<float>(robot_pos.y());
+    float dz = z - static_cast<float>(robot_pos.z());
+    if (dx*dx + dy*dy + dz*dz > r_max_sq) continue;
+    in_sphere_keys.insert(key);
+    LeafEntry e;
+    e.pos   = Eigen::Vector3f(x, y, z);
+    e.state = se.state;
+    e.var   = se.var;
+    e.size  = res;
+    leaves.push_back(e);
+  }
+
+  // Pass 2: UNKNOWN frontier candidates — unobserved neighbors of in-sphere voxels.
+  std::unordered_set<VoxelKey, VoxelKeyHash> unknown_added;
+  unknown_added.reserve(65536);
+  for (const VoxelKey& key : in_sphere_keys) {
+    for (int k = 0; k < 6; ++k) {
+      VoxelKey nkey{ key.ix + kOff[k][0],
+                     key.iy + kOff[k][1],
+                     key.iz + kOff[k][2] };
+      if (in_sphere_keys.count(nkey)) continue;        // already in leaves as observed
+      if (!unknown_added.insert(nkey).second) continue; // duplicate UNKNOWN
+      float nx = nkey.ix * res, ny = nkey.iy * res, nz = nkey.iz * res;
+      float dx = nx - static_cast<float>(robot_pos.x());
+      float dy = ny - static_cast<float>(robot_pos.y());
+      float dz = nz - static_cast<float>(robot_pos.z());
+      if (dx*dx + dy*dy + dz*dz > r_max_sq) continue;  // outside r_max
+      LeafEntry e;
+      e.pos   = Eigen::Vector3f(nx, ny, nz);
+      e.state = la3dm::State::UNKNOWN;
+      e.var   = 0.f;
+      e.size  = res;
+      leaves.push_back(e);
+    }
+  }
+
+  ROS_WARN_THROTTLE(5.0, "[STATE_INDEX] build_leaves: observed=%zu  unknown_frontier=%zu  total=%zu",
+                    in_sphere_keys.size(), unknown_added.size(), leaves.size());
+  return leaves;
 }
 
 std::pair<double, double> AEPlanner::gainCubature(Eigen::Vector4d state, double robot_roll)
@@ -1631,12 +1696,21 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
   lock.unlock();
 
   // Hand dirty entries to computePriorityCache() for incremental index updates.
-  // Append under dirty_mutex_ after releasing ot_mutex_ to avoid holding two locks.
+  // Filter UNKNOWN-only voxels (irrelevant to both candidate_index_ and state_index_)
+  // and deduplicate into dirty_map_ so the map stays bounded to N_unique OCC/FREE
+  // voxels rather than growing by N_all_prediction_voxels per scan.
   if (!local_dirty.empty()) {
+    const float dirty_res = static_cast<float>(params_.resolution);
     std::lock_guard<std::mutex> dlk(dirty_mutex_);
-    dirty_buffer_.insert(dirty_buffer_.end(),
-                         std::make_move_iterator(local_dirty.begin()),
-                         std::make_move_iterator(local_dirty.end()));
+    for (auto& e : local_dirty) {
+      if (!e.active && e.state == la3dm::State::UNKNOWN) continue;
+      VoxelKey key{
+          static_cast<int32_t>(std::lround(e.pos.x() / dirty_res)),
+          static_cast<int32_t>(std::lround(e.pos.y() / dirty_res)),
+          static_cast<int32_t>(std::lround(e.pos.z() / dirty_res))
+      };
+      dirty_map_[key] = std::move(e);  // last-write-wins; deduplicates across scans
+    }
   }
   ROS_WARN_THROTTLE(2.0,
     "[CB_TIMING] prepare=%.3fs  wait_for_lock=%.3fs  commit=%.3fs",

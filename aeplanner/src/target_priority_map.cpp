@@ -39,21 +39,41 @@ void TargetPriorityMap::updateNow()
     robot_pos = robot_pos_;
   }
 
-  // Phase 1: extract leaves from the real map under a brief shared_lock.
-  // All classification and clustering runs after the lock is released.
-  ros::WallTime t_tpm0 = ros::WallTime::now();
+  ros::WallTime t_extract0 = ros::WallTime::now();
   std::vector<LeafEntry> raw_leaves;
   {
     std::shared_lock<std::shared_mutex> lk(ot_mutex_);
     raw_leaves = extractLeaves(ot_, robot_pos, params_.r_max);
   }
+  ROS_WARN("[TPM_TIMING] extract=%.3fs  leaves=%zu  (octree scan)",
+           (ros::WallTime::now() - t_extract0).toSec(), raw_leaves.size());
+  runClassifyAndPublish(std::move(raw_leaves), robot_pos);
+}
+
+void TargetPriorityMap::updateNow(std::vector<LeafEntry> pre_built_leaves)
+{
+  if (!ot_) return;
+
+  Eigen::Vector3d robot_pos;
+  {
+    std::lock_guard<std::mutex> lk(robot_pos_mutex_);
+    robot_pos = robot_pos_;
+  }
+
+  ROS_WARN("[TPM_TIMING] extract=0.000s  leaves=%zu  (state_index, no lock)",
+           pre_built_leaves.size());
+  runClassifyAndPublish(std::move(pre_built_leaves), robot_pos);
+}
+
+void TargetPriorityMap::runClassifyAndPublish(
+    std::vector<LeafEntry> raw_leaves,
+    const Eigen::Vector3d& robot_pos)
+{
   ros::WallTime t_tpm1 = ros::WallTime::now();
   std::vector<ClassifiedVoxel> all_voxels =
       classifyExtracted(raw_leaves, params_.sigma2_thresh);
   ros::WallTime t_tpm2 = ros::WallTime::now();
-  ROS_WARN("[TPM_TIMING] leaves_total=%zu  extract=%.3fs  classify=%.3fs",
-           raw_leaves.size(),
-           (t_tpm1 - t_tpm0).toSec(),
+  ROS_WARN("[TPM_TIMING] classify=%.3fs",
            (t_tpm2 - t_tpm1).toSec());
 
   // Split: U_TARGETs kept globally; frontiers filtered to local r_max
@@ -83,6 +103,11 @@ void TargetPriorityMap::updateNow()
     if (v.type == TargetType::E_OCC) e_occ_voxels.push_back(v);
     else                             e_free_voxels.push_back(v);
   }
+
+  // Skip E_FREE when disabled (explore_free_space=false) or when higher-priority targets exist.
+  // When disabled, mission ends as soon as U_TARGET+E_OCC are exhausted (targets.empty()).
+  if (!params_.explore_free_space || !e_occ_voxels.empty() || !u_voxels.empty())
+    e_free_voxels.clear();
 
   std::vector<FrontierCluster> occ_clusters  = detectFrontierClusters(e_occ_voxels,  params_.R_cluster);
   std::vector<FrontierCluster> free_clusters = detectFrontierClusters(e_free_voxels, params_.R_cluster);

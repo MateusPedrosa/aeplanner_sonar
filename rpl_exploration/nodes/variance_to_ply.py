@@ -97,5 +97,5 @@ class VarianceToPly:
 if __name__ == '__main__':
     output = sys.argv[1] if len(sys.argv) > 1 else "variance.ply"
     rospy.init_node('variance_to_ply', anonymous=True)
-    converter = VarianceToPly("/variance_vis_array", output)
+    converter = VarianceToPly("/bgkloctomap/variance_vis_array", output)
     rospy.spin()

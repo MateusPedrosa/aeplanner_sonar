@@ -33,6 +33,7 @@ int main(int argc, char** argv)
   // Open logfile;
   std::string path = ros::package::getPath("rpl_exploration");
   std::ofstream logfile, pathfile;
+  system(("mkdir -p " + path + "/data").c_str());
   logfile.open(path + "/data/logfile.csv");
   pathfile.open(path + "/data/path.csv");
 
@@ -279,6 +280,15 @@ int main(int argc, char** argv)
 
         ROS_INFO("[VIEWPLANNER] Results saved to: %s", run_dir.c_str());
 
+        // Wait up to 60 s for the PLY export to complete, then kill all nodes.
+        // The VIZ timer fires every ~17 s; the script subscribes to the latched
+        // variance topic and receives the next publish automatically.
+        std::string ply_path = run_dir + "/map.ply";
+        for (int i = 0; i < 120; ++i) {
+          ros::Duration(0.5).sleep();
+          if (access(ply_path.c_str(), F_OK) == 0) break;
+        }
+        system("rosnode kill -a 2>/dev/null");
         ros::shutdown();
         return 0;
       }

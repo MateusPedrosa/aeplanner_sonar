@@ -327,6 +327,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/resolve_face_target", params.resolve_face_target)) {
       ROS_WARN_STREAM("No viewplanner/resolve_face_target specified. Default: " << params.resolve_face_target);
     }
+    params.explore_free_space = false;
+    if (!ros::param::get(ns + "/viewplanner/explore_free_space", params.explore_free_space)) {
+      ROS_WARN_STREAM("No viewplanner/explore_free_space specified. Default: false");
+    }
 
     // --- Sonar roll handling in gainCubature ---
     params.n_roll_samples = 0;
