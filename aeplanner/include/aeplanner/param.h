@@ -100,6 +100,7 @@ namespace aeplanner
     int    min_u_cluster_size;  // min voxels per U_TARGET cluster to be considered a target (default 1)
     bool   resolve_face_target; // true = face target while traveling in RESOLVE; false = face direction of travel (default true)
     bool   explore_free_space;  // true = explore until full bounding-box coverage; false = stop when U_TARGET+E_OCC exhausted (default false)
+    double rrt_early_stop_ratio; // stop RRT* when path length ≤ ratio × straight-line distance (default 1.05)
 
     // --- Sonar roll handling in gainCubature ---
     int    n_roll_samples;         // 0 = rest-position only; N = average over N servo angles (default 0)

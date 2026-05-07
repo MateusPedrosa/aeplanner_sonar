@@ -331,6 +331,10 @@ namespace aeplanner
     if (!ros::param::get(ns + "/viewplanner/explore_free_space", params.explore_free_space)) {
       ROS_WARN_STREAM("No viewplanner/explore_free_space specified. Default: false");
     }
+    params.rrt_early_stop_ratio = 1.05;
+    if (!ros::param::get(ns + "/viewplanner/rrt_early_stop_ratio", params.rrt_early_stop_ratio)) {
+      ROS_WARN_STREAM("No viewplanner/rrt_early_stop_ratio specified. Default: 1.05");
+    }
 
     // --- Sonar roll handling in gainCubature ---
     params.n_roll_samples = 0;

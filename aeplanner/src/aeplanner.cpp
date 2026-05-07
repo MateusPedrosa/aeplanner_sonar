@@ -142,18 +142,6 @@ void AEPlanner::execute(const aeplanner::aeplannerGoalConstPtr& goal)
     succeed("NO_MAP"); return;
   }
 
-  // Drain scan points queued by cloudCallback into the occupied-voxel snapshot.
-  // No ot_mutex_ acquired — cloudCallback pushes raw PCL points (already in
-  // world frame) to pending_occupied_points_ under pending_mutex_, and execute()
-  // (single-threaded action-server) drains them here under the same cheap mutex.
-  planning_snapshot_.resolution = ot_->get_resolution();
-  {
-    std::lock_guard<std::mutex> lk(pending_mutex_);
-    for (const auto& pt : pending_occupied_points_)
-      planning_snapshot_.insert(pt.x(), pt.y(), pt.z());
-    pending_occupied_points_.clear();
-  }
-
   // State machine tick — determines EXPLORE/RESOLVE/DWELL/DONE
   std::vector<ScoredTarget> tpm_targets;
   if (tpm_) tpm_targets = tpm_->getTargets();
@@ -1055,9 +1043,11 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
   RRTNode* best_goal_node = nullptr;
   double   best_goal_dist = std::numeric_limits<double>::max();
 
-  int dbg_no_parent = 0, dbg_oob = 0, dbg_collision = 0, dbg_added = 0;
+  int  dbg_no_parent = 0, dbg_oob = 0, dbg_collision = 0, dbg_added = 0, dbg_iter = 0;
+  bool dbg_early_stopped = false;
   for (int i = 0; i < params_.cutoff_iterations && ros::ok(); ++i)
   {
+    ++dbg_iter;
     // 10% goal-biased, 90% informed sample.
     Eigen::Vector4d sample;
     if ((double)rand() / RAND_MAX < 0.1) {
@@ -1091,11 +1081,13 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
     double d = (new_node->state_.head<3>() - x_goal).norm();
     if (d < best_goal_dist) { best_goal_dist = d; best_goal_node = new_node; }
 
-    // Update c_best when a node reaches the goal region; do NOT break so the
-    // informed sampler keeps refining with the remaining iteration budget.
     if (d < params_.dwell_arrival_thresh) {
       double c = new_node->cost() + d;
-      if (c < c_best) c_best = c;
+      if (c < c_best) {
+        c_best = c;
+        if (c_best < params_.rrt_early_stop_ratio * c_min + params_.dwell_arrival_thresh)
+          { dbg_early_stopped = true; break; }
+      }
     }
   }
 
@@ -1150,8 +1142,11 @@ std::vector<Eigen::Vector4d> AEPlanner::planPathToGoal(const Eigen::Vector4d& go
 
   ROS_INFO_STREAM("[RESOLVE] planPathToGoal: " << path.size()
     << " waypoints, best_goal_dist=" << best_goal_dist << " m"
-    << "  [added=" << dbg_added << " no_parent=" << dbg_no_parent
-    << " oob=" << dbg_oob << " collision=" << dbg_collision << "]");
+    << "  [iter=" << dbg_iter << "/" << params_.cutoff_iterations
+    << " added=" << dbg_added << " no_parent=" << dbg_no_parent
+    << " oob=" << dbg_oob << " collision=" << dbg_collision
+    << " early_stop=" << (dbg_early_stopped ? "YES" : "no")
+    << " c_best/c_min=" << (std::isinf(c_best) ? -1.0 : c_best / c_min) << "]");
   return path;
 }
 
@@ -1237,6 +1232,7 @@ void AEPlanner::computePriorityCache()
       std::lock_guard<std::mutex> dlk(dirty_mutex_);
       pending.swap(dirty_map_);
     }
+    planning_snapshot_.resolution = res;
     for (const auto& kv : pending) {
       const VoxelKey&                        key = kv.first;
       const la3dm::BGKLOctoMap::DirtyEntry&  e   = kv.second;
@@ -1254,6 +1250,11 @@ void AEPlanner::computePriorityCache()
       } else {
         state_index_.erase(key);
       }
+      // Keep planning_snapshot_ consistent with BGKLOctoMap's current occupancy state.
+      if (e.state == la3dm::State::OCCUPIED)
+        planning_snapshot_.insert(e.pos.x(), e.pos.y(), e.pos.z());
+      else
+        planning_snapshot_.remove(e.pos.x(), e.pos.y(), e.pos.z());
     }
     if (!index_bootstrapped_) {
       index_bootstrapped_ = true;
@@ -1718,16 +1719,6 @@ void AEPlanner::cloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
     (t_lock_acquired   - t_lock_wait_start).toSec(),
     (t_committed       - t_lock_acquired).toSec());
   // 'prepared' destructor runs here, freeing BGKL3f objects (after lock release)
-
-  // Queue scan points for the planning snapshot.
-  // execute() drains this into planning_snapshot_ at the top of each tick.
-  // No ot_mutex_ needed — pcl_cloud is already in world frame.
-  {
-    std::lock_guard<std::mutex> lk(pending_mutex_);
-    pending_occupied_points_.reserve(pending_occupied_points_.size() + pcl_cloud->size());
-    for (const auto& pt : *pcl_cloud)
-      pending_occupied_points_.emplace_back(pt.x, pt.y, pt.z);
-  }
 
   // Publish viewpoint history so callers can monitor the sonar update rate.
   // Latched: new subscribers always receive the buffered history without

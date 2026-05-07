@@ -84,6 +84,13 @@ struct OccupiedSnapshot
                                static_cast<int32_t>(std::floor(z / resolution)))) > 0;
   }
 
+  void remove(float x, float y, float z)
+  {
+    keys.erase(packKey(static_cast<int32_t>(std::floor(x / resolution)),
+                       static_cast<int32_t>(std::floor(y / resolution)),
+                       static_cast<int32_t>(std::floor(z / resolution))));
+  }
+
   bool empty() const { return keys.empty(); }
 };
 
@@ -199,11 +206,6 @@ private:
   // no mutex needed for planning_snapshot_ itself.
   OccupiedSnapshot planning_snapshot_;
 
-  // cloudCallback appends scan points here after each map commit.
-  // execute() drains the queue into planning_snapshot_ at the start of each
-  // tick. This keeps ot_mutex_ free throughout the entire planning loop.
-  std::vector<Eigen::Vector3f> pending_occupied_points_;
-  std::mutex                   pending_mutex_;
 
   // Priority voxel cache — computed once per planning cycle so that the
   // expensive map iteration is not repeated per candidate viewpoint.

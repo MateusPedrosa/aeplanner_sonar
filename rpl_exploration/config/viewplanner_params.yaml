@@ -32,6 +32,9 @@ viewplanner:
   N_fail:              3       # Consecutive failures before blacklisting a target
   T_cooldown:          30.0    # Blacklist cooldown duration (s)
 
+  # RRT* early termination
+  rrt_early_stop_ratio:  1.05    # stop RRT* when path length ≤ 5% above straight-line distance
+
   # Navigation heading during RESOLVE travel
   resolve_face_target: true   # true = face the target; false = face direction of travel (original behavior)
 
